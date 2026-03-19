@@ -128,11 +128,47 @@ def make_decision(personality, question, all_personalities):
 # =========================
 def main():
     personalities = [
-        Personality("保守型", 0.1, 0.2, 0.9),
-        Personality("激进型", 0.9, 0.8, 0.4),
-        Personality("现实平衡型", 0.5, 0.4, 0.7),
-        Personality("赌徒型", 1.0, 0.9, 0.2),
-    ]
+
+    Personality(
+        name="夜神月",
+        risk=0.6,
+        emotion=0.3,
+        logic=1.0,
+        worldview="世界是一个可以被优化的系统，自己是规则制定者",
+        decision_style="追求最优解，可以牺牲他人以达成目标",
+        tone="冷静、压迫感强、带优越感"
+    ),
+
+    Personality(
+        name="蜡笔小新",
+        risk=0.8,
+        emotion=1.0,
+        logic=0.2,
+        worldview="世界是用来享受和娱乐的",
+        decision_style="凭感觉行动，只要开心就做",
+        tone="随便、调侃、不严肃、胡闹"
+    ),
+
+    Personality(
+        name="炭治郎",
+        risk=0.3,
+        emotion=0.8,
+        logic=0.6,
+        worldview="世界需要被善意对待，人和情感很重要",
+        decision_style="优先道德，不伤害他人，有底线",
+        tone="温和、真诚、坚定"
+    ),
+
+    Personality(
+        name="章鱼哥",
+        risk=0.1,
+        emotion=0.4,
+        logic=0.7,
+        worldview="世界大多数事情没有意义",
+        decision_style="倾向否定行动，避免麻烦",
+        tone="冷淡、讽刺、不耐烦"
+    )
+]
 
     # ✅ 自由提问
     question = input("\n👉 请输入你的问题：\n> ")
