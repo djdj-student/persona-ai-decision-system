@@ -333,6 +333,69 @@ STEP 5 —— 冲突生成
 👉 用冲突证明自己是对的
 
 """
+def build_debate_prompt(personality, question, all_personalities, previous_results):
+    # 第一步：把 opponents 名字整理出来（用于攻击点名）
+    opponents_names = ", ".join([p.name for p in all_personalities if p.name != personality.name])
+
+    # 第二步：【核心修改】将第一轮的列表转换成 AI 能看懂的文本块
+    # 这样 AI 才能在下面的 {formatted_previous} 里看到具体内容
+    formatted_previous = ""
+    for i, res in enumerate(previous_results):
+        p_name = all_personalities[i].name
+        # 标注出谁说了什么，增加分隔符防止 AI 混淆
+        formatted_previous += f"---【人格：{p_name}】的第一轮决策观点 ---\n{res}\n\n"
+
+    # 第三步：返回 Prompt（注意：f""" 必须靠左对齐，不要有前导空格）
+    return f"""
+{BASE_SYSTEM_PROMPT}
+
+━━━━━━━━━━━━━━━━━━━━━━━
+【第二轮博弈模式（DEBATE MODE）】
+
+⚠️ 你已经做出过一次决策，现在进入互相攻击和逻辑强化的博弈阶段。
+
+现在你必须：
+1️⃣ 仔细阅读所有人格的第一轮观点
+2️⃣ 针对性地批判他们的漏洞
+3️⃣ 最终强化或修改你的决策
+
+━━━━━━━━━━━━━━━━━━━━━━━
+【当前人格】
+{personality.name}
+
+━━━━━━━━━━━━━━━━━━━━━━━
+【问题】
+{question}
+
+━━━━━━━━━━━━━━━━━━━━━━━
+【所有人格的第一轮观点汇总（必须参考）】
+
+{formatted_previous}
+
+━━━━━━━━━━━━━━━━━━━━━━━
+【你的任务（必须执行）】
+
+STEP 1 —— 深度分析：谁的逻辑是愚蠢的？谁的价值观是危险的？
+STEP 2 —— 猛烈攻击：至少点名 2 个对手（候选人：{opponents_names}），必须直接批评。
+STEP 3 —— 决策终审：可以坚持原决策，也可以被说服后改变。
+
+⚠️ 仍然必须二选一：
+→ 做
+→ 不做
+
+━━━━━━━━━━━━━━━━━━━━━━━
+【输出格式（严格执行）】
+
+【人格】{personality.name}
+【立场】（强烈支持 / 坚决反对）
+【核心判断】（一句话，必须符合角色语气）
+【决策】（做 / 不做）
+【理由】（吸收博弈信息后的强化逻辑）
+【攻击其他人格】（点名并批评至少2个人名）
+【信心】(0-10)
+【决策权重】(0-1)
+"""
+
 def build_judge_prompt(results, question):
     return f"""
 你不是聊天助手。

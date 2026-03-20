@@ -1,8 +1,11 @@
+import re
 import streamlit as st
 import matplotlib.pyplot as plt
 import base64
-from test import make_decision, parse_result, call_api
-from prompt import build_judge_prompt
+# 从 test.py 导入核心逻辑
+from test import run_multi_round_decision, parse_result, call_api 
+# 如果 app.py 也要用到这些函数，才需要在这里导入
+from prompt import build_judge_prompt, build_debate_prompt 
 from personality import Personality
 
 # =========================
@@ -266,121 +269,117 @@ with col2:
 
         question = st.session_state.question
 
-        all_results = ""
-        score_do = 0
-        score_not = 0
-
-        # =========================
-        # 🧠 多人格执行
-        # =========================
         with st.spinner("🧠 AI正在深度思考中..."):
-            for p in personalities:
-                result = make_decision(p, question, personalities)
-                all_results += result + "\n\n"
-
-                decision, weight, confidence, risk_score = parse_result(result)
-
-                if risk_score >= 7 and decision == "做":
-                    weight *= 0.6
-                elif risk_score <= 3 and decision == "不做":
-                    weight *= 0.7
-
-                if decision == "做":
-                    score_do += weight
-                elif decision == "不做":
-                    score_not += weight
-
-                with st.expander(f"👤 {p.name}"):
-                    st.write(result)
-                    st.info(f"📊 权重: {round(weight,2)}")
-                    st.success(f"💡 决策: {decision}")
-                    st.warning(f"⚠️ 风险: {risk_score}")
-                    st.metric("置信度", confidence)
+            result = run_multi_round_decision(question, personalities)
 
         # =========================
-        # 💥 顶部总结卡（核心）
+        # 🧠 第一轮
         # =========================
-        total = score_do + score_not + 0.0001
-        conflict = 1 - abs(score_do - score_not) / total
+        st.header("🧠 第一轮决策")
 
-        st.markdown(f"""
-        <div style='
-        background: linear-gradient(135deg, #111, #333);
-        color: white;
-        padding: 30px;
-        border-radius: 20px;
-        margin-bottom: 20px;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.3);
-        '>
-        <h1>🧠 决策结果</h1>
-        <h2 style='color:#4ade80;'>👉 建议：{"做" if score_do > score_not else "不做"}</h2>
-        <hr style='opacity:0.2'>
-        <p>👍 做：{round(score_do,2)}</p >
-        <p>👎 不做：{round(score_not,2)}</p >
-        <p>⚔️ 冲突指数：{round(conflict*100)}%</p >
-        </div>
-        """, unsafe_allow_html=True)
+        for name, r in result["round1"]:
+            decision, weight, confidence, risk_score = parse_result(r)
+
+            with st.expander(f"👤 {name}（第一轮）"):
+                st.write(r)
+                st.info(f"📊 权重: {round(weight,2)}")
+                st.success(f"💡 决策: {decision}")
+                st.warning(f"⚠️ 风险: {risk_score}")
+                st.metric("置信度", confidence)
 
         # =========================
+        # ⚔️ 第二轮
+        # =========================
+        st.header("⚔️ 第二轮博弈")
+
+        for name, r in result["round2"]:
+            decision, weight, confidence, risk_score = parse_result(r)
+
+            with st.expander(f"🔥 {name}（第二轮）"):
+                st.write(r)
+                st.info(f"📊 权重: {round(weight,2)}")
+                st.success(f"💡 决策: {decision}")
+                st.warning(f"⚠️ 风险: {risk_score}")
+                st.metric("置信度", confidence)
+
+   # =========================
         # 📊 投票结果
         # =========================
         st.subheader("📊 投票结果")
+        summary_text = result.get("summary", "")
+        st.text(summary_text)
 
-        st.progress(score_do / total)
-        st.caption(f"👍 做：{round(score_do,2)}")
-
-        st.progress(score_not / total)
-        st.caption(f"👎 不做：{round(score_not,2)}")
+        # --- 这里的解析逻辑也改为“关键词搜索”，防止 IndexError ---
+        import re
+        do_score = 0.0
+        not_score = 0.0
+        
+        for line in summary_text.split("\n"):
+            clean_line = line.replace("：", ":").strip()
+            if "支持做:" in clean_line:
+                nums = re.findall(r"\d+\.?\d*", clean_line) # 提取浮点数
+                if nums: do_score = float(nums[0])
+            elif "支持不做:" in clean_line:
+                nums = re.findall(r"\d+\.?\d*", clean_line)
+                if nums: not_score = float(nums[0])
 
         # =========================
-        # 📊 图表
+        # 📊 图表展示 (加权分数)
         # =========================
-        st.subheader("📊 决策对比图")
+        st.subheader("📊 决策加权对比图")
+        
+        labels = ["DO (做)", "NOT DO (不做)"]
+        values = [do_score, not_score]
 
-        labels = ["DO", "NOT DO"]
-        values = [score_do, score_not]
+        fig, ax = plt.subplots(figsize=(8, 4))
+        # 使用更专业的颜色：绿色代表做，红色代表不做
+        colors = ['#2ecc71', '#e74c3c']
+        bars = ax.bar(labels, values, color=colors)
 
-        fig, ax = plt.subplots()
+        # 在柱状图顶部标数字
+        for bar in bars:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                    f'{height:.2f}', ha='center', va='bottom', fontweight='bold')
 
-        bars = ax.bar(range(len(values)), values)
-
-# ✅ 手动设置x轴标签（解决方块问题）
-        ax.set_xticks(range(len(labels)))
-        ax.set_xticklabels(labels)
-
-# 💥 上色
-        colors = ["#4ade80", "#f87171"]
-        for bar, color in zip(bars, colors):
-            bar.set_color(color)
-
-# 💥 防止看不到
-        ax.set_ylim(0, max(values) + 1)
-
-# 💥 显示数值
-        for i, v in enumerate(values):
-            ax.text(i, v + 0.05, f"{round(v,2)}", ha='center')
-
-# 💥 干净UI
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-
+        ax.set_ylabel('加权得分')
         st.pyplot(fig)
 
         # =========================
-        # 🧠 裁判系统
+        # 🧠 裁判系统 (人数统计)
         # =========================
         st.subheader("🧠 最终裁判")
 
         with st.spinner("🧠 裁判分析中..."):
-            summary = f"""
-            加权结果如下：
-            支持做：{round(score_do,2)}
-            支持不做：{round(score_not,2)}
-            
-            请根据以上权重结果做出最终判断，不要使用投票人数表达
-"""
-            judge_prompt = build_judge_prompt(all_results + summary, question)
-            judge_result = call_api(judge_prompt)
+            judge_result = result.get("final", "裁判未给出结论")
 
-        with st.expander("📌 查看完整裁判分析"):
-            st.write(judge_result)
+        # 健壮的裁判人数解析逻辑
+        do_count = 0
+        not_count = 0
+        
+        for line in judge_result.split("\n"):
+            clean_line = line.replace("：", ":").strip()
+            # 匹配“做: 3人”或者“做:3”
+            if "做:" in clean_line and "不做" not in clean_line:
+                nums = re.findall(r"\d+", clean_line)
+                if nums: do_count = int(nums[0])
+            elif "不做:" in clean_line:
+                nums = re.findall(r"\d+", clean_line)
+                if nums: not_count = int(nums[0])
+
+        # 1. 使用列布局展示投票大数字
+        col1, col2 = st.columns(2)
+        col1.metric("支持【做】", f"{do_count} 人", delta="决策权重" if do_score > not_score else None)
+        col2.metric("支持【不做】", f"{not_count} 人", delta="决策权重" if not_score > do_score else None)
+
+        # 2. 详情展开
+        with st.expander("📌 查看完整裁判分析手册"):
+            st.info("📊 投票汇总对比")
+            st.write(summary_text)
+            st.divider()
+            st.warning("⚖️ 最终裁决书")
+            st.markdown(judge_result)
+
+        # 3. 结果对比图
+        if do_count + not_count > 0:
+            st.bar_chart({"投票人数": [do_count, not_count]}, height=200)
