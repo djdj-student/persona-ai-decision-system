@@ -169,7 +169,7 @@ st.markdown("""
 
 .block-container .stProgress,
 .block-container canvas {
-    background: rgba(0,0,0,0.4);
+    background: rgba(255, 255, 255, 0.85);
     border-radius: 12px;
     padding: 10px;
 }
@@ -328,7 +328,7 @@ with col2:
         # =========================
         st.subheader("📊 决策加权对比图")
         
-        labels = ["DO (做)", "NOT DO (不做)"]
+        labels = ["DO", "NOT DO"]
         values = [do_score, not_score]
 
         fig, ax = plt.subplots(figsize=(8, 4))
@@ -342,7 +342,7 @@ with col2:
             ax.text(bar.get_x() + bar.get_width()/2., height + 0.01,
                     f'{height:.2f}', ha='center', va='bottom', fontweight='bold')
 
-        ax.set_ylabel('加权得分')
+        ax.set_ylabel('weighted score')
         st.pyplot(fig)
 
         # =========================
@@ -367,11 +367,6 @@ with col2:
                 nums = re.findall(r"\d+", clean_line)
                 if nums: not_count = int(nums[0])
 
-        # 1. 使用列布局展示投票大数字
-        col1, col2 = st.columns(2)
-        col1.metric("支持【做】", f"{do_count} 人", delta="决策权重" if do_score > not_score else None)
-        col2.metric("支持【不做】", f"{not_count} 人", delta="决策权重" if not_score > do_score else None)
-
         # 2. 详情展开
         with st.expander("📌 查看完整裁判分析手册"):
             st.info("📊 投票汇总对比")
@@ -379,7 +374,3 @@ with col2:
             st.divider()
             st.warning("⚖️ 最终裁决书")
             st.markdown(judge_result)
-
-        # 3. 结果对比图
-        if do_count + not_count > 0:
-            st.bar_chart({"投票人数": [do_count, not_count]}, height=200)
