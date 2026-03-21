@@ -1,12 +1,10 @@
 import re
 import streamlit as st
-import matplotlib.pyplot as plt
 import base64
-# 从 test.py 导入核心逻辑
-from test import run_multi_round_decision, parse_result, call_api 
-# 如果 app.py 也要用到这些函数，才需要在这里导入
-from prompt import build_judge_prompt, build_debate_prompt 
+from test import call_api
 from personality import Personality
+from hybrid_system import HybridDecisionSystem
+from agent_engine import AgentDecisionEngine
 
 # =========================
 # 🎨 页面配置
@@ -164,17 +162,6 @@ st.markdown("""
 }
 
 /* =========================
-   📊 投票 & 图表卡片
-   ========================= */
-
-.block-container .stProgress,
-.block-container canvas {
-    background: rgba(255, 255, 255, 0.85);
-    border-radius: 12px;
-    padding: 10px;
-}
-
-/* =========================
    🧠 裁判卡片（重点）
    ========================= */
 
@@ -191,6 +178,89 @@ st.markdown("""
     background: rgba(0,0,0,0.6) !important;
     color: white !important;
     border-radius: 12px !important;
+}
+
+/* =========================
+   📈 Stage 4.5 / Stage 5 可读性增强
+   ========================= */
+
+/* metric 卡片（支持『做』/评分等） */
+[data-testid="stMetric"] {
+    background: rgba(0, 0, 0, 0.62) !important;
+    border: 1px solid rgba(255, 255, 255, 0.14) !important;
+    border-radius: 14px !important;
+    padding: 14px 12px !important;
+}
+
+[data-testid="stMetricLabel"] p,
+[data-testid="stMetricValue"] {
+    color: #ffffff !important;
+}
+
+/* 表格容器和单元格 */
+[data-testid="stTable"] table {
+    background: rgba(0, 0, 0, 0.62) !important;
+    color: #ffffff !important;
+    border-radius: 12px !important;
+    overflow: hidden !important;
+}
+
+[data-testid="stTable"] th,
+[data-testid="stTable"] td {
+    color: #ffffff !important;
+    background: rgba(0, 0, 0, 0.52) !important;
+    border-color: rgba(255, 255, 255, 0.14) !important;
+}
+
+/* dataframe（用于隐藏索引后的评估表） */
+[data-testid="stDataFrame"] {
+    background: rgba(0, 0, 0, 0.62) !important;
+    border: 1px solid rgba(255, 255, 255, 0.14) !important;
+    border-radius: 12px !important;
+}
+
+[data-testid="stDataFrame"] * {
+    color: #ffffff !important;
+}
+
+/* 最佳/最差人格卡片 */
+.judge-card {
+    background: rgba(0, 0, 0, 0.62);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 14px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+}
+
+.judge-card-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: #ffffff;
+    margin-bottom: 8px;
+}
+
+.judge-card-main {
+    font-size: 20px;
+    font-weight: 700;
+    color: #ffffff;
+    margin-bottom: 6px;
+}
+
+.judge-card-line {
+    font-size: 14px;
+    color: rgba(255, 255, 255, 0.95);
+    margin: 3px 0;
+}
+
+/* info/success/error 提示块统一高对比 */
+[data-testid="stAlert"] {
+    background: rgba(0, 0, 0, 0.62) !important;
+    color: #ffffff !important;
+    border: 1px solid rgba(255,255,255,0.14) !important;
+}
+
+[data-testid="stAlert"] * {
+    color: #ffffff !important;
 }
 
 </style>
@@ -255,9 +325,19 @@ with col1:
         placeholder="例如：我该不该辞职创业？"
     )
 
+    use_local_only = st.toggle("🔒 纯本地模式（不调用LLM）", value=False)
+    depth = st.selectbox(
+        "🧠 反思深度",
+        options=["quick", "standard", "deep", "expert"],
+        index=2,
+        help="quick 最快，expert 最深"
+    )
+
     if st.button("🚀 开始决策"):
         st.session_state.run = True
         st.session_state.question = question
+        st.session_state.use_local_only = use_local_only
+        st.session_state.depth = depth
 
     st.markdown("---")
 
@@ -268,109 +348,343 @@ with col2:
     if st.session_state.get("run") and st.session_state.question:
 
         question = st.session_state.question
+        use_local_only = st.session_state.get("use_local_only", False)
+        depth = st.session_state.get("depth", "deep")
 
         with st.spinner("🧠 AI正在深度思考中..."):
-            result = run_multi_round_decision(question, personalities)
+            system = HybridDecisionSystem(llm_call_func=None if use_local_only else call_api)
+            result = system.full_decision_workflow(
+                personalities=personalities,
+                question=question,
+                depth=depth,
+                use_llm=not use_local_only
+            )
 
-        # =========================
-        # 🧠 第一轮
-        # =========================
-        st.header("🧠 第一轮决策")
+        st.caption(f"🔧 运行模式：{'纯本地' if use_local_only else '混合'} | 反思深度：{depth}")
 
-        for name, r in result["round1"]:
-            decision, weight, confidence, risk_score = parse_result(r)
+        stages = result.get("stages", {})
 
-            with st.expander(f"👤 {name}（第一轮）"):
-                st.write(r)
-                st.info(f"📊 权重: {round(weight,2)}")
-                st.success(f"💡 决策: {decision}")
-                st.warning(f"⚠️ 风险: {risk_score}")
-                st.metric("置信度", confidence)
+        # 详细 Stage 1-3 工作流
+        with st.expander("📊 工作流详情 (Stage 1-3)", expanded=True):
+            # Stage 1 本地决策
+            st.markdown("### 👤 Stage 1 - 各人格初始决策（本地引擎）")
+            local_decisions = stages.get("1_local_decisions", {})
+            for name, data in local_decisions.items():
+                decision = data.get("decision", "?")
+                confidence = data.get("confidence", 0)
+                weight = data.get("weight", 0)
+                risk_score = data.get("risk_score", 0)
+                reasoning = data.get("reasoning", "")
 
-        # =========================
-        # ⚔️ 第二轮
-        # =========================
-        st.header("⚔️ 第二轮博弈")
+                with st.expander(f"{name} | 初始决策：{decision}", expanded=False):
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        st.metric("置信度", f"{confidence}/10")
+                    with c2:
+                        st.metric("决策权重", f"{weight:.2f}")
+                    with c3:
+                        st.metric("风险评分", f"{risk_score}/10")
 
-        for name, r in result["round2"]:
-            decision, weight, confidence, risk_score = parse_result(r)
+                    if reasoning:
+                        st.markdown("**本地推理摘要：**")
+                        st.write(reasoning)
 
-            with st.expander(f"🔥 {name}（第二轮）"):
-                st.write(r)
-                st.info(f"📊 权重: {round(weight,2)}")
-                st.success(f"💡 决策: {decision}")
-                st.warning(f"⚠️ 风险: {risk_score}")
-                st.metric("置信度", confidence)
+            # Stage 2 LLM 验证
+            st.markdown("### ✅ Stage 2 - LLM 验证（人格一致性检查）")
+            if not use_local_only:
+                validations = stages.get("2_llm_validations", {})
+                if validations:
+                    for name, data in validations.items():
+                        validated = data.get("validated", False)
+                        status = "✅ 验证通过" if validated else "⚠️ 需要调整"
+                        with st.expander(f"{name} | {status}", expanded=False):
+                            reason = data.get("reason", "")
+                            full_response = data.get("full_response", "")
 
-   # =========================
-        # 📊 投票结果
-        # =========================
-        st.subheader("📊 投票结果")
-        summary_text = result.get("summary", "")
-        st.text(summary_text)
+                            if reason:
+                                st.markdown("**验证结论：**")
+                                st.write(reason)
 
-        # --- 这里的解析逻辑也改为“关键词搜索”，防止 IndexError ---
-        import re
-        do_score = 0.0
-        not_score = 0.0
+                            if full_response:
+                                st.markdown("**LLM 详细反馈：**")
+                                st.write(full_response)
+                else:
+                    st.write("暂无 LLM 验证数据")
+            else:
+                st.info("当前为纯本地模式，已跳过 Stage 2 的 LLM 验证。")
+
+            # Stage 3 多轮反思
+            st.markdown("### 🧠 Stage 3 - 多轮反思轨迹（Round by Round）")
+            reflections = stages.get("3_reflections", {})
+            for name, data in reflections.items():
+                init = data.get("initial_decision", "?")
+                final = data.get("final_verdict", "?")
+                arrow = "→" if init != final else "═"
+                confidence_evo = data.get("confidence_evolution", [])
+                rounds = data.get("rounds", [])
+
+                with st.expander(f"{name} | 决策演化：{init} {arrow} {final}", expanded=False):
+                    if confidence_evo:
+                        evo_text = " → ".join(str(v) for v in confidence_evo)
+                        st.markdown(f"**置信度演化：** {evo_text}")
+
+                    if rounds:
+                        for round_data in rounds:
+                            round_no = round_data.get("round", "?")
+                            round_type = round_data.get("type", "未知类型")
+                            recommendation = round_data.get("recommendation", "?")
+                            conf_shift = round_data.get("confidence_shift", "?")
+                            change_reason = round_data.get("change_reason", "")
+
+                            st.markdown(f"#### Round {round_no} - {round_type}")
+                            st.write(f"- 推荐决策：{recommendation}")
+                            st.write(f"- 本轮置信度：{conf_shift}")
+
+                            thought_process = round_data.get("thought_process", [])
+                            if thought_process:
+                                st.markdown("**思考过程：**")
+                                for item in thought_process:
+                                    st.write(f"- {item}")
+
+                            potential_issues = round_data.get("potential_issues", [])
+                            if potential_issues:
+                                st.markdown("**发现问题：**")
+                                for item in potential_issues:
+                                    st.write(f"- {item}")
+
+                            critical_questions = round_data.get("critical_questions", [])
+                            if critical_questions:
+                                st.markdown("**关键追问：**")
+                                for item in critical_questions:
+                                    st.write(f"- {item}")
+
+                            analysis_items = round_data.get("analysis", [])
+                            if analysis_items:
+                                st.markdown("**深入分析：**")
+                                for item in analysis_items:
+                                    st.write(f"- {item}")
+
+                            failure_simulation = round_data.get("failure_simulation", [])
+                            if failure_simulation:
+                                st.markdown("**失败预演：**")
+                                for item in failure_simulation:
+                                    st.write(f"- {item}")
+
+                            mitigation = round_data.get("mitigation", [])
+                            if mitigation:
+                                st.markdown("**补救策略：**")
+                                for item in mitigation:
+                                    st.write(f"- {item}")
+
+                            opposing_view = round_data.get("opposing_view", "")
+                            counter_argument = round_data.get("counter_argument", "")
+                            final_defense = round_data.get("final_defense", "")
+                            if opposing_view:
+                                st.markdown("**自我对抗（魔鬼代言人）：**")
+                                st.write(f"- 反方观点：{opposing_view}")
+                            if counter_argument:
+                                st.write(f"- 质疑：{counter_argument}")
+                            if final_defense:
+                                st.write(f"- 最终辩护：{final_defense}")
+
+                            if change_reason:
+                                st.write(f"- 变化原因：{change_reason}")
+
+                            st.divider()
+
+        # Stage 4 多人格博弈 - 新结构：一个主决策者对其他三个人
+        st.header("💬 Stage 4 - 多人格博弈竞技场")
+        st.write("*每个人格都分别对阵其他三个人。展示一对一的完整对决过程。*")
         
-        for line in summary_text.split("\n"):
-            clean_line = line.replace("：", ":").strip()
-            if "支持做:" in clean_line:
-                nums = re.findall(r"\d+\.?\d*", clean_line) # 提取浮点数
-                if nums: do_score = float(nums[0])
-            elif "支持不做:" in clean_line:
-                nums = re.findall(r"\d+\.?\d*", clean_line)
-                if nums: not_score = float(nums[0])
-
-        # =========================
-        # 📊 图表展示 (加权分数)
-        # =========================
-        st.subheader("📊 决策加权对比图")
+        dialogues = stages.get("4_dialogues", {})
         
-        labels = ["DO", "NOT DO"]
-        values = [do_score, not_score]
+        if dialogues:
+            # 提取所有独特的人格
+            all_speakers = set()
+            for pair in dialogues.keys():
+                speakers = pair.split("_vs_")  # 改为正确的分隔符
+                if len(speakers) == 2:
+                    all_speakers.add(speakers[0])
+                    all_speakers.add(speakers[1])
+            
+            all_speakers = sorted(list(all_speakers))
+            
+            # 为每个人格创建一个"主人公"视角
+            for main_speaker in all_speakers:
+                with st.expander(f"🎭 {main_speaker} 的三线对决", expanded=False):
+                    st.write(f"**{main_speaker}** 同时与其他三个人格进行论战。展示其完整的论证过程。\n")
+                    
+                    # 找出这个主人公的所有对手
+                    opponents_data = []
+                    for pair, data in dialogues.items():
+                        if main_speaker in pair:
+                            speakers = pair.split("_vs_")  # 改为正确的分隔符
+                            if len(speakers) == 2:
+                                opponent = speakers[1] if speakers[0] == main_speaker else speakers[0]
+                                opponents_data.append((opponent, data))
+                    
+                    # 按三个对手分别显示
+                    for opponent, debate in opponents_data:
+                        with st.expander(f"⚔️ {main_speaker} ⚔️ {opponent}", expanded=True):
+                            exchanges = debate.get("exchanges", [])
+                            intensity = debate.get("conflict_intensity", 0)
+                            
+                            # 显示冲突强度
+                            if intensity > 0.7:
+                                conflict_label = "⚔️🔥 强烈冲突"
+                            elif intensity > 0.4:
+                                conflict_label = "💢 中等冲突"
+                            else:
+                                conflict_label = "💬 温和讨论"
+                            
+                            st.write(f"**冲突强度：{conflict_label} ({intensity:.2f})**\n")
+                            
+                            if exchanges:
+                                # 按轮次显示对话
+                                for idx, exchange in enumerate(exchanges, 1):
+                                    speaker = exchange.get("speaker", "未知")
+                                    
+                                    # 动态决定标题
+                                    round_label = f"【第 {idx} 轮】"
+                                    if "argument" in exchange:
+                                        round_label += f"{speaker} 的初始论点"
+                                        content = exchange.get("argument", "")
+                                    elif "counter_argument" in exchange:
+                                        other_speaker = opponent if speaker != opponent else main_speaker
+                                        round_label += f"{speaker} 反驳 {other_speaker}"
+                                        content = exchange.get("counter_argument", "")
+                                    elif "rebuttal" in exchange:
+                                        other_speaker = opponent if speaker != opponent else main_speaker
+                                        round_label += f"{speaker} 的强硬回应"
+                                        content = exchange.get("rebuttal", "")
+                                    else:
+                                        content = ""
+                                    
+                                    # 根据说话人着色
+                                    if speaker == main_speaker:
+                                        st.markdown(f"### 🟦 {round_label}")
+                                        st.markdown(f"**【{speaker}】**")
+                                    else:
+                                        st.markdown(f"### 🟥 {round_label}")
+                                        st.markdown(f"**【{speaker}】**")
+                                    
+                                    # 显示内容（支持多行）
+                                    if isinstance(content, str) and len(content) > 200:
+                                        st.markdown(content)
+                                    else:
+                                        st.markdown(f"> {content}")
+                                    
+                                    st.divider()
+                            else:
+                                st.write("暂无对话内容")
+        else:
+            st.write("暂无博弈数据")
 
-        fig, ax = plt.subplots(figsize=(8, 4))
-        # 使用更专业的颜色：绿色代表做，红色代表不做
-        colors = ['#2ecc71', '#e74c3c']
-        bars = ax.bar(labels, values, color=colors)
-
-        # 在柱状图顶部标数字
-        for bar in bars:
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height + 0.01,
-                    f'{height:.2f}', ha='center', va='bottom', fontweight='bold')
-
-        ax.set_ylabel('weighted score')
-        st.pyplot(fig)
-
-        # =========================
-        # 🧠 裁判系统 (人数统计)
-        # =========================
-        st.subheader("🧠 最终裁判")
-
-        with st.spinner("🧠 裁判分析中..."):
-            judge_result = result.get("final", "裁判未给出结论")
-
-        # 健壮的裁判人数解析逻辑
-        do_count = 0
-        not_count = 0
+        # Stage 4.5 裁判评估系统
+        st.header("🏆 Stage 4.5 - 裁判评估系统")
+        judge = stages.get("4.5_judge", {})
         
-        for line in judge_result.split("\n"):
-            clean_line = line.replace("：", ":").strip()
-            # 匹配“做: 3人”或者“做:3”
-            if "做:" in clean_line and "不做" not in clean_line:
-                nums = re.findall(r"\d+", clean_line)
-                if nums: do_count = int(nums[0])
-            elif "不做:" in clean_line:
-                nums = re.findall(r"\d+", clean_line)
-                if nums: not_count = int(nums[0])
-
-        # 2. 详情展开
-        with st.expander("📌 查看完整裁判分析手册"):
-            st.info("📊 投票汇总对比")
-            st.write(summary_text)
+        if judge:
+            # 投票统计
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                vote_do = len(judge.get("vote_summary", {}).get("做", []))
+                st.metric("支持『做』", vote_do)
+            with col2:
+                vote_not = len(judge.get("vote_summary", {}).get("不做", []))
+                st.metric("支持『不做』", vote_not)
+            with col3:
+                best_score = judge.get("best_personality_score", 0)
+                st.metric("最佳评分", f"{best_score:.2f}/10")
+            
             st.divider()
-            st.warning("⚖️ 最终裁决书")
-            st.markdown(judge_result)
+            
+            # 人格质量评估表
+            st.subheader("📊 个人格质量评估")
+            evals = judge.get("personality_evaluations", {})
+            
+            # 创建评估表
+            eval_data = []
+            for name, eval_info in evals.items():
+                eval_data.append({
+                    "人格": name,
+                    "决策": eval_info.get("decision", "?"),
+                    "信心": f"{eval_info.get('confidence', 0)}/10",
+                    "逻辑一致性": f"{eval_info.get('logic_consistency', 0):.2f}",
+                    "现实性": f"{eval_info.get('realism', 0):.2f}",
+                    "综合评分": f"{eval_info.get('composite_score', 0):.2f}/10"
+                })
+            
+            st.dataframe(eval_data, use_container_width=True, hide_index=True)
+            
+            st.divider()
+            
+            # 最佳和最差
+            best_col, worst_col = st.columns(2)
+            
+            with best_col:
+                best_name = judge.get("best_personality", "未知")
+                best_eval = evals.get(best_name, {})
+                st.markdown(
+                    f"""
+                    <div class="judge-card">
+                        <div class="judge-card-title">🏆 最佳人格</div>
+                        <div class="judge-card-main">{best_name}</div>
+                        <div class="judge-card-line">综合评分：{judge.get('best_personality_score', 0):.2f}/10</div>
+                        <div class="judge-card-line">逻辑一致性：{best_eval.get('logic_consistency', 0):.2f}</div>
+                        <div class="judge-card-line">决策现实性：{best_eval.get('realism', 0):.2f}</div>
+                        <div class="judge-card-line">偏见程度：{best_eval.get('bias_level', 0):.2f}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            
+            with worst_col:
+                worst_name = judge.get("worst_personality", "未知")
+                worst_eval = evals.get(worst_name, {})
+                st.markdown(
+                    f"""
+                    <div class="judge-card">
+                        <div class="judge-card-title">❌ 最差人格</div>
+                        <div class="judge-card-main">{worst_name}</div>
+                        <div class="judge-card-line">原因：{judge.get('worst_personality_reason', '未知')}</div>
+                        <div class="judge-card-line">逻辑一致性：{worst_eval.get('logic_consistency', 0):.2f}</div>
+                        <div class="judge-card-line">决策现实性：{worst_eval.get('realism', 0):.2f}</div>
+                        <div class="judge-card-line">偏见程度：{worst_eval.get('bias_level', 0):.2f}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            
+            st.divider()
+            
+            # 裁判建议
+            st.info(f"🎯 **裁判建议**\n{judge.get('recommendation', '暂无建议')}")
+
+        # Stage 5 最终合成
+        st.header("🏁 Stage 5 - 最终合成")
+        synthesis = stages.get("5_synthesis", {})
+        final_decision = synthesis.get("final_decision", "未知")
+        score_do = synthesis.get("score_do", 0)
+        score_not = synthesis.get("score_not", 0)
+        conflict_index = synthesis.get("conflict_index", 0)
+
+        if final_decision == "做":
+            st.success(f"🎯 最终建议：{final_decision}")
+        elif final_decision == "不做":
+            st.error(f"🎯 最终建议：{final_decision}")
+        else:
+            st.warning(f"🎯 最终建议：{final_decision}")
+
+        st.write(f"冲突指数：{conflict_index:.1f}%")
+        recommendation = synthesis.get("recommendation", "")
+        if recommendation:
+            st.info(recommendation)
+
+        # 简洁的加权分数展示
+        st.subheader("📊 最终加权分数")
+        col_do, col_not = st.columns(2)
+        with col_do:
+            st.metric("支持『做』", f"{score_do:.2f}")
+        with col_not:
+            st.metric("支持『不做』", f"{score_not:.2f}")

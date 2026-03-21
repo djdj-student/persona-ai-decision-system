@@ -6,7 +6,20 @@ import requests
 import time
 import re
 import random
+import json
+from datetime import datetime
 from personality import Personality
+
+# 🔧 配置日志
+LOG_DIR = "decision_logs"
+if not os.path.exists(LOG_DIR):
+    os.makedirs(LOG_DIR)
+
+def log_message(msg):
+    """记录日志到控制台和文件"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_msg = f"[{timestamp}] {msg}"
+    print(log_msg)
 
 # 👉 API配置
 API_URL = "https://api.deepseek.com/chat/completions"
@@ -18,7 +31,8 @@ API_KEY = os.getenv("DEEPSEEK_API_KEY")
 def clean_text(text):
     return text.encode("utf-8", "ignore").decode("utf-8")
 
-def call_api(prompt):
+def call_api(prompt, max_retries=3):
+    """调用 DeepSeek API，带重试机制和详细错误日志"""
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json"
@@ -32,7 +46,7 @@ def call_api(prompt):
         "temperature": 0.9
     }
 
-    for i in range(3):
+    for attempt in range(max_retries):
         try:
             response = requests.post(
                 API_URL,
@@ -40,58 +54,111 @@ def call_api(prompt):
                 json=data,
                 timeout=30
             )
-
             response.raise_for_status()
-
             res = response.json()
             return res["choices"][0]["message"]["content"]
 
-        except requests.exceptions.RequestException as e:
-            print("❌ API错误:", e)
-            print(f"⚠️ 重试 {i+1}/3")
+        except requests.exceptions.Timeout:
+            log_message(f"❌ API 超时错误 (尝试 {attempt + 1}/{max_retries})")
+        except requests.exceptions.ConnectionError as e:
+            log_message(f"❌ API 连接错误: {str(e)[:100]} (尝试 {attempt + 1}/{max_retries})")
+        except requests.exceptions.HTTPError as e:
+            log_message(f"❌ API HTTP错误: {response.status_code} (尝试 {attempt + 1}/{max_retries})")
+        except (KeyError, ValueError) as e:
+            log_message(f"❌ API 响应解析错误: {str(e)[:100]} (尝试 {attempt + 1}/{max_retries})")
+            return "❌ 无法解析 API 响应"
+        except Exception as e:
+            log_message(f"❌ 未知错误: {str(e)[:100]} (尝试 {attempt + 1}/{max_retries})")
+        
+        if attempt < max_retries - 1:
             time.sleep(2)
 
-    return "❌ API调用失败"
+    log_message("❌ API 调用失败：已超过最大重试次数")
+    return "❌ API 调用失败"
 # =========================
 # 🔥 解析函数（最终版）
 # =========================
-def parse_result(result):
+def parse_result(result, debug=False):
+    """解析 API 返回的决策信息，包含详细错误日志"""
     decision = None
     confidence = 5
     weight = 0.5
     risk_score = 5
+    
+    if debug:
+        log_message(f"🔍 调试模式：原始响应前200字符:  {result[:200]}")
 
     # ✅ 决策解析（防bug）
     try:
-        decision_part = result.split("【决策】")[1].strip().split("\n")[0]
-
+        decision_part = result.split("【决策】")[1].strip().split("\n")[0].strip()
         if "不做" in decision_part:
             decision = "不做"
         elif "做" in decision_part:
             decision = "做"
-    except:
-        pass
+        if debug and decision:
+            log_message(f"✅ 决策成功解析: {decision}")
+    except (IndexError, AttributeError) as e:
+        log_message(f"⚠️ 决策解析失败: {str(e)[:100]}")
 
-    # ✅ 置信度
+    # ✅ 信心度（对应 Prompt 中的【信心】，0-10）
     try:
-        conf_part = result.split("【对自己结论的置信度】")[1]
-        confidence = float(conf_part.strip().split("\n")[0])
-    except:
-        confidence = 5
+        # 尝试新标签
+        conf_part = result.split("【信心】")[1]
+        confidence_str = conf_part.strip().split("\n")[0].strip()
+        confidence = float(confidence_str)
+        if debug:
+            log_message(f"✅ 信心度成功解析: {confidence}")
+    except (IndexError, ValueError):
+        try:
+            # 备选标签以兼容旧格式
+            conf_part = result.split("【对自己结论的置信度】")[1]
+            confidence_str = conf_part.strip().split("\n")[0].strip()
+            confidence = float(confidence_str)
+            if debug:
+                log_message(f"✅ 置信度(备选)成功解析: {confidence}")
+        except (IndexError, ValueError) as e:
+            log_message(f"⚠️ 信心度解析失败，使用默认值 5: {str(e)[:100]}")
+            if debug:
+                log_message(f"   搜索文本中是否包含【信心】或【置信度】...")
+            confidence = 5
 
-    # ✅ 权重
-    match = re.search(r"【决策权重】\s*([0-9.]+)", result)
-    if match:
-        weight = float(match.group(1))
-    else:
+    # ✅ 权重（对应 Prompt 中的【决策权重】，0-1）
+    try:
+        match = re.search(r"【决策权重】\s*([0-9.]+)", result)
+        if match:
+            weight = float(match.group(1))
+            if debug:
+                log_message(f"✅ 权重成功解析: {weight}")
+        else:
+            weight = min(confidence / 10, 0.99)
+            if debug:
+                log_message(f"⚠️ 权重未找到，使用信心度推算: {weight}")
+    except ValueError as e:
+        log_message(f"⚠️ 权重转换失败: {str(e)[:100]}")
         weight = confidence / 10
 
-    # ✅ 问题风险
+    # ✅ 风险评分（对应 Prompt 中的【风险评分】，0-10）
     try:
-        risk_part = result.split("【问题风险评估】")[1]
-        risk_score = float(risk_part.strip().split("\n")[0])
-    except:
-        risk_score = 5
+        # 尝试新标签
+        risk_match = re.search(r"【风险评分】\s*([0-9]+)", result)
+        if risk_match:
+            risk_score = float(risk_match.group(1))
+            if debug:
+                log_message(f"✅ 风险评分成功解析: {risk_score}")
+        else:
+            raise ValueError("未找到【风险评分】")
+    except (IndexError, ValueError):
+        try:
+            # 备选标签以兼容旧格式
+            risk_part = result.split("【问题风险评估】")[1]
+            risk_score = float(risk_part.strip().split("\n")[0])
+            if debug:
+                log_message(f"✅ 风险评估(备选)成功解析: {risk_score}")
+        except (IndexError, ValueError) as e:
+            log_message(f"⚠️ 风险评分解析失败，使用默认值 5: {str(e)[:100]}")
+            if debug:
+                log_message(f"   搜索文本中是否包含【风险评分】或【问题风险评估】...")
+            risk_score = 5
 
     return decision, weight, confidence, risk_score
 
@@ -175,7 +242,14 @@ def run_multi_round_decision(question, personalities):
     }
 
 
-def main():
+def main(debug=False):
+    # 🔧 设置随机种子以保证可复现性（可选）
+    # random.seed(42)  # 取消注释以获得确定性结果
+    
+    if debug:
+        log_message("🔍 调试模式已启用：将显示所有解析细节")
+    log_message("🚀 多人格决策系统启动")
+    
     personalities = [
 
         Personality(
@@ -232,36 +306,27 @@ def main():
     # =========================
     # 🧠 多人格执行
     # =========================
-    # =========================
     # 🧠 第一轮（初始决策）
     # =========================
     results_round1 = []
+    log_message("\n🎬 第一轮：初始决策开始")
 
     for p in personalities:
         result = call_api(build_prompt(p, question, personalities))
+        log_message(f"✅ {p.name} 完成第一轮决策")
         print(f"\n🧠 {p.name} 第一轮：\n")
         print(result)
         print("\n====================\n")
-
         results_round1.append(result)
-
 
     # =========================
     # ⚔️ 第二轮（人格博弈）
     # =========================
     results_round2 = []
-
-    # ========================================================
-    # 🔥 防御性导入：在这里强制重新加载函数，彻底解决 NameError
-    # ========================================================
-    try:
-        from prompt import build_debate_prompt, build_judge_prompt
-    except ImportError:
-        print("❌ 错误：无法从 prompt.py 导入函数，请检查文件名是否正确！")
+    log_message("\n⚔️ 第二轮：人格博弈开始")
 
     # 开始循环
     for i, p in enumerate(personalities):
-        # 此时 build_debate_prompt 已被加载到局部作用域，绝对可用
         debate_prompt = build_debate_prompt(
             personality=p,
             question=question,
@@ -280,10 +345,11 @@ def main():
         results_round2.append(result)
 
         # 🔥 解析
-        decision, weight, confidence, risk_score = parse_result(result)
+        decision, weight, confidence, risk_score = parse_result(result, debug=debug)
 
         # 🔥 展示增强（比赛加分点）
-        print(f"👉 解析：决策={decision} | 权重={weight:.2f} | 置信度={confidence} | 风险={risk_score}")
+        print(f"👉 解析：决策={decision} | 权重={weight:.2f} | 信心={confidence} | 风险={risk_score}")
+        log_message(f"📊 {p.name}: 决策={decision}, 权重={weight:.2f}, 信心={confidence}, 风险={risk_score}")
 
         # 🔥 人格检测
         check_personality_consistency(p, decision)
@@ -317,6 +383,7 @@ def main():
 """
 
     print(summary)
+    log_message(f"📊 投票结果 - 支持做: {round(score_do, 2)}, 支持不做: {round(score_not, 2)}")
 
     # =========================
     # 🔥 冲突指数（比赛亮点）
@@ -324,7 +391,9 @@ def main():
     total = score_do + score_not
     if total > 0:
         conflict = 1 - abs(score_do - score_not) / total
-        print(f"⚔️ 人格冲突指数：{round(conflict * 100)}%")
+        conflict_pct = round(conflict * 100)
+        print(f"⚔️ 人格冲突指数：{conflict_pct}%")
+        log_message(f"⚔️ 人格冲突指数: {conflict_pct}%")
 
     # =========================
     # 🧠 裁判系统
@@ -342,3 +411,30 @@ def main():
 
     print("🏁 最终裁决：\n")
     print(final_result)
+    
+    # =========================
+    # 💾 保存决策记录
+    # =========================
+    decision_record = {
+        "timestamp": datetime.now().isoformat(),
+        "question": question,
+        "round1_results": results_round1,
+        "round2_results": results_round2,
+        "scores": {"支持做": round(score_do, 2), "支持不做": round(score_not, 2)},
+        "conflict_index": round(conflict * 100) if total > 0 else 0,
+        "final_judgment": final_result
+    }
+    
+    filename = os.path.join(LOG_DIR, f"decision_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(decision_record, f, ensure_ascii=False, indent=2)
+    
+    log_message(f"💾 决策记录已保存到: {filename}")
+
+# =========================
+# 🚀 启动脚本
+# =========================
+if __name__ == "__main__":
+    # 调试模式：设置为 True 可以看到详细的解析日志
+    main(debug=True)
+    
