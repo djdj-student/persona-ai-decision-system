@@ -1,6 +1,7 @@
 # 🧠 Agent 反思系统（多轮深度思考）
 
 import json
+import random
 import re
 from datetime import datetime
 from typing import Dict, List
@@ -418,6 +419,69 @@ class AgentDialogueSystem:
     
     def __init__(self):
         self.dialogue_history = []
+        self._last_variant_index = {}
+
+    def _choose_from_pool(self, key: str, options: List[str]) -> str:
+        """从候选句池随机取一条，并尽量避免与上次同key重复。"""
+        if not options:
+            return ""
+        if len(options) == 1:
+            self._last_variant_index[key] = 0
+            return options[0]
+
+        last_idx = self._last_variant_index.get(key, -1)
+        idx = random.randrange(len(options))
+        if idx == last_idx:
+            idx = (idx + 1) % len(options)
+
+        self._last_variant_index[key] = idx
+        return options[idx]
+
+    def _line_variant(self,
+                      speaker: Personality,
+                      opponent: Personality,
+                      phase: str,
+                      core_line: str,
+                      channel: str) -> str:
+        """给核心句套上2-3个口语变体壳，避免同分支复读。"""
+        if not core_line:
+            return ""
+
+        key = f"{speaker.name}:{opponent.name}:{phase}:{channel}"
+
+        prefix_pool = {
+            "argument": ["先把话挑明：", "我先把核心掰开说：", "我直说重点："],
+            "counter": ["我就抓你这点说：", "你这句我得正面回：", "先反打你这个逻辑："],
+            "rebuttal": ["我再补一刀：", "我把结论钉死：", "最后我就说透："],
+        }
+
+        suffix_pool = {
+            "argument": ["这不是情绪，这是判断。", "这一条我不会让步。", "这句你得听进去。"],
+            "counter": ["这就是你的漏洞。", "这点你绕不过去。", "你要反驳先补这块。"],
+            "rebuttal": ["我的立场不会变。", "这个结论我继续扛。", "到这里我不再退。"],
+        }
+
+        tone_hint = {
+            "夜神月": ["按我的计算，", "变量已经摆在这，", "你先看执行面，"],
+            "蜡笔小新": ["哈哈，", "欸先别急，", "我跟你说哦，"],
+            "炭治郎": ["我认真讲，", "我必须讲清楚，", "这件事我不能含糊，"],
+            "章鱼哥": ["（叹气）", "（又叹气）", "唉，"],
+        }
+
+        pfx = self._choose_from_pool(
+            f"{key}:pfx",
+            prefix_pool.get(phase, [""])
+        )
+        sfx = self._choose_from_pool(
+            f"{key}:sfx",
+            suffix_pool.get(phase, [""])
+        )
+        hint = self._choose_from_pool(
+            f"{key}:hint",
+            tone_hint.get(speaker.name, [""])
+        )
+
+        return f"{hint}{pfx}{core_line}{sfx}"
 
     def _apply_persona_voice(self, speaker: Personality, text: str, phase: str) -> str:
         """把模板化文本压成更口语、更有角色辨识度的发言。"""
@@ -520,6 +584,189 @@ class AgentDialogueSystem:
             "nihilism": any(k in t for k in ["没意义", "都一样", "叹气", "无所谓", "空虚"]),
             "risk": any(k in t for k in ["风险", "危险", "后果", "代价"]),
         }
+
+    def _reasoning_signal(self, reasoning: str, limit: int = 42) -> str:
+        """提取思考痕迹短句，让对话显式体现推理来源。"""
+        if not reasoning:
+            return "我先按经验做判断。"
+
+        candidates = []
+        for raw in reasoning.replace("\n", "；").split("；"):
+            s = raw.strip()
+            if not s:
+                continue
+            if any(k in s for k in ["风险", "后果", "底线", "变量", "思考", "证据", "初始", "终局"]):
+                candidates.append(s)
+
+        if not candidates:
+            candidates = [reasoning.strip()]
+
+        chosen = candidates[0]
+        if len(chosen) > limit:
+            chosen = chosen[:limit] + "..."
+        return f"我刚才复盘过：{chosen}"
+
+    def _duel_strategy(self, speaker: Personality, opponent: Personality, phase: str) -> Dict[str, str]:
+        """同一主人格对不同对手使用不同反驳模板。"""
+        persona_map = {
+            "夜神月": {
+                "蜡笔小新": {
+                    "argument": "你的判断像即兴玩乐，我按系统优化来。",
+                    "counter": "你把快乐当方向盘，决策会直接失控。",
+                    "rebuttal": "你的随机性就是最大风险源。",
+                },
+                "炭治郎": {
+                    "argument": "你的道德感可敬，但它不能替代执行方案。",
+                    "counter": "只有底线没有路径，等于把决策外包给运气。",
+                    "rebuttal": "善良不是策略，控制才是策略。",
+                },
+                "章鱼哥": {
+                    "argument": "你的虚无不是看透，只是放弃计算。",
+                    "counter": "你说都一样，是因为你拒绝承担决策成本。",
+                    "rebuttal": "不行动本身也是一种失败选择。",
+                },
+            },
+            "蜡笔小新": {
+                "夜神月": {
+                    "argument": "你把人生当实验室，太紧绷了。",
+                    "counter": "你每句话都像在写操作手册，真的很无聊。",
+                    "rebuttal": "你想算赢一切，结果先输掉了快乐。",
+                },
+                "炭治郎": {
+                    "argument": "你太想当好人，动作慢半拍。",
+                    "counter": "你一直怕伤害别人，连自己想做什么都忘了。",
+                    "rebuttal": "你的谨慎很体面，但会错过时机。",
+                },
+                "章鱼哥": {
+                    "argument": "你这人最大的问题就是没劲。",
+                    "counter": "你说都没意义，只是在给不行动找台阶。",
+                    "rebuttal": "你把空虚讲成真理，听着就想睡。",
+                },
+            },
+            "炭治郎": {
+                "夜神月": {
+                    "argument": "你过分追求控制，忽视了人的代价。",
+                    "counter": "你把人当变量，这一点我不能接受。",
+                    "rebuttal": "再高效的方案，越过底线就是错。",
+                },
+                "蜡笔小新": {
+                    "argument": "你把快乐放第一位，但后果同样要负责。",
+                    "counter": "冲动不是勇敢，承担后果才是。",
+                    "rebuttal": "我不是反对行动，我反对无责任行动。",
+                },
+                "章鱼哥": {
+                    "argument": "你把无意义当结论，其实是在逃避选择。",
+                    "counter": "就算困难，也不能把责任交给消极。",
+                    "rebuttal": "我会继续做对的事，不会因为疲惫放弃。",
+                },
+            },
+            "章鱼哥": {
+                "夜神月": {
+                    "argument": "你太沉迷掌控，现实可没那么听话。",
+                    "counter": "你把一切都当可计算变量，迟早翻车。",
+                    "rebuttal": "你的自信常常只是延迟到来的失望。",
+                },
+                "蜡笔小新": {
+                    "argument": "你靠兴奋决策，冷下来就只剩烂摊子。",
+                    "counter": "你说开心就做，但麻烦不会因为开心消失。",
+                    "rebuttal": "短暂热闹以后，还是同样空。",
+                },
+                "炭治郎": {
+                    "argument": "你想拯救所有人，最后常常先耗尽自己。",
+                    "counter": "高道德姿态很好看，但现实会很累。",
+                    "rebuttal": "你坚持得很动人，结局通常很普通。",
+                },
+            },
+        }
+
+        default_map = {
+            "argument": "我先把你核心漏洞挑出来。",
+            "counter": "你这条逻辑链条不完整。",
+            "rebuttal": "你还没回应关键矛盾。",
+        }
+
+        persona_strategy = persona_map.get(speaker.name, {})
+        versus = persona_strategy.get(opponent.name, default_map)
+        core_line = versus.get(phase, default_map.get(phase, ""))
+        return {
+            "line": self._line_variant(speaker, opponent, phase, core_line, "style")
+        }
+
+    def _versus_payload(self, speaker: Personality, opponent: Personality, phase: str, position: str) -> str:
+        """对手特异主干句：确保同一人格面对三位对手时不是同模板。"""
+        payload = {
+            "夜神月": {
+                "蜡笔小新": {
+                    "argument": f"你靠兴奋感推进『{position}』，这不是决策，是掷骰子。",
+                    "counter": "你的逻辑只有即时快感，没有风险闭环。",
+                    "rebuttal": "我在谈可复制胜率，你在谈当下情绪。",
+                },
+                "炭治郎": {
+                    "argument": f"你把善意放在第一位，但『{position}』需要的是执行秩序。",
+                    "counter": "你的判断过于理想化，缺少现实约束条件。",
+                    "rebuttal": "道德是约束，不是发动机。",
+                },
+                "章鱼哥": {
+                    "argument": f"你先否定一切再评价『{position}』，等于放弃推理资格。",
+                    "counter": "你所谓看透，本质是拒绝承担。",
+                    "rebuttal": "不作为只是把失败时间推迟。",
+                },
+            },
+            "蜡笔小新": {
+                "夜神月": {
+                    "argument": f"你把『{position}』讲得像军事命令，紧张得要命。",
+                    "counter": "你太想每一步都算对，结果连出手都变慢。",
+                    "rebuttal": "你活在计划里，我活在现场里。",
+                },
+                "炭治郎": {
+                    "argument": f"你总怕做错事，结果『{position}』永远慢一步。",
+                    "counter": "你考虑别人太久，会把自己的机会耗光。",
+                    "rebuttal": "我承认你善良，但机会不会等道德会议开完。",
+                },
+                "章鱼哥": {
+                    "argument": f"你先说都没意义，再否定『{position}』，这就是摆烂循环。",
+                    "counter": "你的问题不是看得清，是根本不想动。",
+                    "rebuttal": "你一直退场，当然觉得舞台无聊。",
+                },
+            },
+            "炭治郎": {
+                "夜神月": {
+                    "argument": f"你为了达成『{position}』愿意牺牲别人，这一点不能接受。",
+                    "counter": "你的效率来自对他人代价的低估。",
+                    "rebuttal": "不把人当人，再漂亮的方案都不成立。",
+                },
+                "蜡笔小新": {
+                    "argument": f"你把『{position}』交给心情决定，这会伤害无辜的人。",
+                    "counter": "你把冲动叫自由，但后果需要别人买单。",
+                    "rebuttal": "快乐重要，但责任更不能缺席。",
+                },
+                "章鱼哥": {
+                    "argument": f"你因为疲惫就否定『{position}』，这是把逃避当答案。",
+                    "counter": "你一直说结果都一样，是因为你放弃了改变。",
+                    "rebuttal": "即使艰难，也不能把不作为合理化。",
+                },
+            },
+            "章鱼哥": {
+                "夜神月": {
+                    "argument": f"你把『{position}』当控制实验，现实只会给你反噬。",
+                    "counter": "你越想完全掌控，崩盘时越难看。",
+                    "rebuttal": "你把不确定性当敌人，最后会被它教育。",
+                },
+                "蜡笔小新": {
+                    "argument": f"你靠情绪推进『{position}』，热度一过就是收拾烂摊子。",
+                    "counter": "你说开心就做，但麻烦从不会自动消失。",
+                    "rebuttal": "短暂热闹之后，空虚照旧。",
+                },
+                "炭治郎": {
+                    "argument": f"你把『{position}』道德化了，现实不会因为善意更轻松。",
+                    "counter": "你总想两全，通常只会两边都累。",
+                    "rebuttal": "你的坚持很动人，但世界没那么在乎。",
+                },
+            },
+        }
+
+        core_line = payload.get(speaker.name, {}).get(opponent.name, {}).get(phase, "")
+        return self._line_variant(speaker, opponent, phase, core_line, "payload")
 
     def _targeted_hit(self,
                       speaker: Personality,
@@ -632,10 +879,16 @@ class AgentDialogueSystem:
             "stance": "强烈支持" if position == "做" else "坚决反对",
         }
         second_target = self._secondary_target(speaker, opponent)
+        trace = self._reasoning_signal(reasoning)
+        style = self._duel_strategy(speaker, opponent, "argument")
+        versus = self._versus_payload(speaker, opponent, "argument", position)
 
         if speaker.name == "夜神月":
             raw_text = (
                 f"我站『{position}』，风险给 {arg['risk_score']}/10。"
+                f"{trace}"
+                f"{style['line']}"
+                f"{versus}"
                 f"这就是唯一最优解。变量我已经算完：时间、成本、机会、执行窗口，全部指向同一个结论。"
                 f"{opponent.name}把情绪当判断，{second_target}把犹豫当谨慎，你们太幼稚了。"
                 f"我不要被安慰，我要控制权。规则要么由我制定，要么被我重写。"
@@ -644,6 +897,9 @@ class AgentDialogueSystem:
         elif speaker.name == "蜡笔小新":
             raw_text = (
                 f"我选『{position}』，风险就给 {arg['risk_score']}/10。"
+                f"{trace}"
+                f"{style['line']}"
+                f"{versus}"
                 f"好玩才重要，开心就做啊，想那么多干嘛。"
                 f"{opponent.name}一开口就是规则和控制，{second_target}一开口就是道德和牺牲，听着就累。"
                 f"你们活得像说明书，我活得像人生。现在想做就做，这才叫在活。"
@@ -652,6 +908,9 @@ class AgentDialogueSystem:
         elif speaker.name == "炭治郎":
             raw_text = (
                 f"我选『{position}』，风险我给 {arg['risk_score']}/10。"
+                f"{trace}"
+                f"{style['line']}"
+                f"{versus}"
                 f"这是底线，不是情绪。"
                 f"{opponent.name}把人当变量，{second_target}把快乐当借口，这两种做法都会让无辜者承担代价。"
                 f"我不能伤害别人，也不能把责任推给命运。哪怕难走，我也要走问心无愧的路。"
@@ -660,6 +919,9 @@ class AgentDialogueSystem:
         elif speaker.name == "章鱼哥":
             raw_text = (
                 f"你们吵吧，我选『{position}』，风险给 {arg['risk_score']}/10。"
+                f"{trace}"
+                f"{style['line']}"
+                f"{versus}"
                 f"『{position}』也好，『{opponent_position}』也罢，结果都一样。"
                 f"{opponent.name}以为自己能掌控一切，{second_target}以为热血就能救世界，听起来都很努力，但都没意义。"
                 f"我不是相信它有多伟大，我只是懒得再演那套改变命运的戏。"
@@ -690,9 +952,15 @@ class AgentDialogueSystem:
         second_target = self._secondary_target(speaker, opponent)
         claims = self._extract_claims(opponent_argument)
         hit = self._targeted_hit(speaker, opponent, claims, position)
+        trace = self._reasoning_signal(reasoning)
+        style = self._duel_strategy(speaker, opponent, "counter")
+        versus = self._versus_payload(speaker, opponent, "counter", position)
 
         if speaker.name == "夜神月":
             raw_text = (
+                f"{trace}"
+                f"{style['line']}"
+                f"{versus}"
                 f"你刚才那套说法，我已经听完了。{hit}"
                 f"听清楚，『{position}』不是口号，是可执行的最优解。"
                 f"{opponent.name}在回避变量，{second_target}在回避责任。你们把冲动包装成勇气，把拖延包装成谨慎。"
@@ -702,6 +970,9 @@ class AgentDialogueSystem:
         
         elif speaker.name == "蜡笔小新":
             raw_text = (
+                f"{trace}"
+                f"{style['line']}"
+                f"{versus}"
                 f"你刚才讲那一大段，我抓到重点了：{hit}"
                 f"哈哈，你想太多啦。『{position}』就是更好玩、更爽、更像活人。"
                 f"{opponent.name}要我按规则活，{second_target}要我按道德活，你们都想把人生变成作业。"
@@ -711,6 +982,9 @@ class AgentDialogueSystem:
         
         elif speaker.name == "炭治郎":
             raw_text = (
+                f"{trace}"
+                f"{style['line']}"
+                f"{versus}"
                 f"我听到了你的理由，我只回应关键点：{hit}"
                 f"我听到了你的理由，但我不能接受。『{position}』必须先过道德这一关。"
                 f"{opponent.name}在用效率掩盖伤害，{second_target}在用情绪逃避后果。"
@@ -720,6 +994,9 @@ class AgentDialogueSystem:
         
         elif speaker.name == "章鱼哥":
             raw_text = (
+                f"{trace}"
+                f"{style['line']}"
+                f"{versus}"
                 f"（叹气）你刚才那段我听到了：{hit}"
                 f"（叹气）你们还在争这个？『{position}』和『{opponent_position}』最后都一样。"
                 f"{opponent.name}太自恋，{second_target}太天真，一个想控制世界，一个想感动世界。"
@@ -752,9 +1029,15 @@ class AgentDialogueSystem:
         second_target = self._secondary_target(speaker, opponent)
         counter_claims = self._extract_claims(opponent_counter)
         counter_hit = self._targeted_hit(speaker, opponent, counter_claims, position)
+        trace = self._reasoning_signal(reasoning)
+        style = self._duel_strategy(speaker, opponent, "rebuttal")
+        versus = self._versus_payload(speaker, opponent, "rebuttal", position)
 
         if speaker.name == "夜神月":
             raw_text = (
+                f"{trace}"
+                f"{style['line']}"
+                f"{versus}"
                 f"你上一轮的反驳我记住了：{counter_hit}"
                 f"我再说一次，『{position}』不是偏好，是结论。"
                 f"{opponent.name}和{second_target}都在回避关键变量：执行成本、回报速度、控制半径。"
@@ -764,6 +1047,9 @@ class AgentDialogueSystem:
         
         elif speaker.name == "蜡笔小新":
             raw_text = (
+                f"{trace}"
+                f"{style['line']}"
+                f"{versus}"
                 f"你刚刚反驳我的点，我就一句：{counter_hit}"
                 f"哈哈，还在讲大道理？我不买账。『{position}』让我现在就有劲，这就够了。"
                 f"{opponent.name}要我变成机器，{second_target}要我变成苦行僧，我才不要。"
@@ -773,6 +1059,9 @@ class AgentDialogueSystem:
         
         elif speaker.name == "炭治郎":
             raw_text = (
+                f"{trace}"
+                f"{style['line']}"
+                f"{versus}"
                 f"你刚才的反驳我回应完了：{counter_hit}"
                 f"我的答案不会变：『{position}』。因为我必须负责，这是我的底线。"
                 f"{opponent.name}忽视了人的痛苦，{second_target}轻视了后果。"
@@ -782,6 +1071,9 @@ class AgentDialogueSystem:
         
         elif speaker.name == "章鱼哥":
             raw_text = (
+                f"{trace}"
+                f"{style['line']}"
+                f"{versus}"
                 f"（继续叹气）你上一轮说的那些，我只回一句：{counter_hit}"
                 f"（继续叹气）我还是那句话：『{position}』和『{opponent_position}』，都不会把你们从空虚里救出来。"
                 f"{opponent.name}太用力，{second_target}太入戏。你们把选择说得像史诗，其实就是普通失望的不同版本。"

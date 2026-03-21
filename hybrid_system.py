@@ -133,10 +133,12 @@ class HybridDecisionSystem:
             for p2 in personalities[i+1:]:
                 reflection1 = stage3_reflections[p1.name]
                 reflection2 = stage3_reflections[p2.name]
+                reasoning1 = self._build_dialogue_reasoning(reflection1)
+                reasoning2 = self._build_dialogue_reasoning(reflection2)
                 
                 dialogue = self.dialogue_system.generate_disagreement_dialogue(
-                    p1, reflection1["final_verdict"], "",
-                    p2, reflection2["final_verdict"], ""
+                    p1, reflection1["final_verdict"], reasoning1,
+                    p2, reflection2["final_verdict"], reasoning2
                 )
                 
                 dialogue_key = f"{p1.name}_vs_{p2.name}"
@@ -202,6 +204,36 @@ class HybridDecisionSystem:
     # =========================
     # 🔧 子流程
     # =========================
+
+    def _build_dialogue_reasoning(self, reflection: Dict) -> str:
+        """把 Stage 3 反思压缩为可供 Stage 4 使用的思考摘要。"""
+        rounds = reflection.get("rounds", [])
+        points = []
+
+        for r in rounds:
+            for item in r.get("potential_issues", []):
+                points.append(str(item))
+            for item in r.get("analysis", []):
+                points.append(str(item))
+            for item in r.get("failure_simulation", []):
+                points.append(str(item))
+            for item in r.get("mitigation", []):
+                points.append(str(item))
+
+        thought_process = []
+        for r in rounds:
+            for item in r.get("thought_process", []):
+                thought_process.append(str(item))
+
+        compact_points = "；".join(points[:4])
+        compact_thought = "；".join(thought_process[:2])
+
+        return (
+            f"初始={reflection.get('initial_decision', '')}；"
+            f"终局={reflection.get('final_verdict', '')}；"
+            f"思考={compact_thought or '无'}；"
+            f"证据={compact_points or '无'}"
+        )
     
     def _llm_validate_decision(self, personality: Personality, question: str, local_decision: Dict) -> Dict:
         """
