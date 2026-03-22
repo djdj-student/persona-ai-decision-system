@@ -506,53 +506,8 @@ class AgentDialogueSystem:
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
         cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
 
-        openers = {
-            "夜神月": {
-                "argument": "听清楚，",
-                "counter": "我只回你一句，",
-                "rebuttal": "结论不变，",
-            },
-            "蜡笔小新": {
-                "argument": "哈哈，",
-                "counter": "欸你先等一下，",
-                "rebuttal": "我还是那句，",
-            },
-            "炭治郎": {
-                "argument": "我认真说，",
-                "counter": "我必须回应你，",
-                "rebuttal": "我不会退这一步，",
-            },
-            "章鱼哥": {
-                "argument": "（叹气），",
-                "counter": "（叹气）我回你一句，",
-                "rebuttal": "（继续叹气）行吧，",
-            },
-        }
-
-        closers = {
-            "夜神月": "记住，规则只会站在赢的人这边。",
-            "蜡笔小新": "反正我就这么选，开心最重要。",
-            "炭治郎": "我问心无愧，这就是答案。",
-            "章鱼哥": "随便吧，结局大概也差不多。",
-        }
-
-        phase_key = "argument"
-        if phase == "counter":
-            phase_key = "counter"
-        elif phase == "rebuttal":
-            phase_key = "rebuttal"
-
-        persona_openers = openers.get(speaker.name, {})
-        opener = persona_openers.get(phase_key, "")
-
-        if opener and not cleaned.startswith(opener):
-            cleaned = opener + cleaned
-
-        closer = closers.get(speaker.name, "")
-        if closer and closer not in cleaned:
-            if not cleaned.endswith(("。", "！", "?", "？", "!")):
-                cleaned += "。"
-            cleaned += " " + closer
+        # 不再注入固定开场/收尾，避免“模板搭配”带来的AI腔。
+        # 这里只做轻量文本清洗，具体语气交给上游生成逻辑（尤其是LLM阶段）。
 
         return cleaned
 
@@ -585,10 +540,19 @@ class AgentDialogueSystem:
             "risk": any(k in t for k in ["风险", "危险", "后果", "代价"]),
         }
 
-    def _reasoning_signal(self, reasoning: str, limit: int = 42) -> str:
-        """提取思考痕迹短句，让对话显式体现推理来源。"""
+    def _reasoning_signal(self, speaker: Personality, reasoning: str, limit: int = 42) -> str:
+        """提取思考痕迹短句，输出更口语、非程序化的推理信号。"""
         if not reasoning:
-            return "我先按经验做判断。"
+            fallback = {
+                "夜神月": ["我先把变量过了一遍。", "我已经把关键约束算过了。"],
+                "蜡笔小新": ["我刚刚脑子里过了一下。", "我先凭直觉试了下这个方向。"],
+                "炭治郎": ["我先确认了会不会伤害别人。", "我先拿底线对照了一遍。"],
+                "章鱼哥": ["我先想了下后果，还是那样。", "我先看了眼结局，大差不差。"],
+            }
+            return self._choose_from_pool(
+                f"trace:{speaker.name}:fallback",
+                fallback.get(speaker.name, ["我先按经验做判断。"])
+            )
 
         candidates = []
         for raw in reasoning.replace("\n", "；").split("；"):
@@ -601,10 +565,120 @@ class AgentDialogueSystem:
         if not candidates:
             candidates = [reasoning.strip()]
 
-        chosen = candidates[0]
+        chosen = self._choose_from_pool(
+            f"trace:{speaker.name}:segment",
+            candidates
+        )
+
+        # 去掉程序化标签
+        chosen = chosen.replace("初始=", "起手判断是")
+        chosen = chosen.replace("终局=", "最后我定在")
+        chosen = chosen.replace("思考=", "我当时主要在想")
+        chosen = chosen.replace("证据=", "我抓到的点是")
+
         if len(chosen) > limit:
             chosen = chosen[:limit] + "..."
-        return f"我刚才复盘过：{chosen}"
+
+        wrappers = {
+            "夜神月": ["我刚才复盘了一遍：{x}", "我刚验算过：{x}", "我先把盘面过完了：{x}"],
+            "蜡笔小新": ["我刚想了下：{x}", "我脑子里过了一遍：{x}", "我先试着想象了一下：{x}"],
+            "炭治郎": ["我先确认了一件事：{x}", "我刚把后果再想了一遍：{x}", "我先问了自己一个问题：{x}"],
+            "章鱼哥": ["（叹气）我刚也想过：{x}", "我刚看了下，大概是：{x}", "（叹气）我先把结果想了一遍：{x}"],
+        }
+
+        template = self._choose_from_pool(
+            f"trace:{speaker.name}:wrapper",
+            wrappers.get(speaker.name, ["我刚才复盘过：{x}"])
+        )
+        return template.format(x=chosen)
+
+    def _rebuttal_freeform(self,
+                           speaker: Personality,
+                           opponent: Personality,
+                           position: str,
+                           opponent_position: str,
+                           trace: str,
+                           counter_hit: str) -> str:
+        """第三轮强硬回应：按主人格×对手生成差异化、非同骨架文本。"""
+        pools = {
+            "夜神月": {
+                "蜡笔小新": [
+                    f"{trace} 你把选择当游乐项目，热闹是有了，稳定性全没了。{counter_hit} 我押『{position}』，因为它能落地、能复盘、能复制。",
+                    f"{trace} 你靠兴奋感决策，今天爽，明天翻车。{counter_hit} 我不玩运气，我只要可控结果，所以继续『{position}』。",
+                    f"{trace} 你的逻辑像烟花，亮一下就散。{counter_hit} 我看的是执行链，不是情绪波动。结论继续：『{position}』。",
+                ],
+                "炭治郎": [
+                    f"{trace} 你的底线我听见了，但你给不出执行路径。{counter_hit} 价值观不能替代方案，我仍然选『{position}』。",
+                    f"{trace} 你把善意摆在最前面，却把效率和窗口期放在最后。{counter_hit} 我不会把决策交给愿望。『{position}』继续。",
+                    f"{trace} 你在谈应然，我在处理实然。{counter_hit} 局面不会因为正确姿态自动变好，所以我维持『{position}』。",
+                ],
+                "章鱼哥": [
+                    f"{trace} 你先把一切判成无意义，再来评价方案，这本身就不成立。{counter_hit} 我继续『{position}』，因为不作为才是慢性失误。",
+                    f"{trace} 你的看透更像提前投降。{counter_hit} 我不接受这种躺平结论，『{position}』才有赢面。",
+                    f"{trace} 你把失败预设成终局，所以看什么都灰。{counter_hit} 我不会按你的消极剧本走，结论还是『{position}』。",
+                ],
+            },
+            "蜡笔小新": {
+                "夜神月": [
+                    f"{trace} 你说得像在开作战会议，听着就累。{counter_hit} 我就选『{position}』，因为人生不是流程图。",
+                    f"{trace} 你什么都要算到小数点，结果人都僵住了。{counter_hit} 我不要那种活法，『{position}』才像真的在活。",
+                    f"{trace} 你老想把每一步都控死，反而没弹性。{counter_hit} 我继续『{position}』，先动起来再说。",
+                ],
+                "炭治郎": [
+                    f"{trace} 你太怕伤到别人，连自己都不敢往前走。{counter_hit} 我还是选『{position}』，先活起来才有后面。",
+                    f"{trace} 你把责任背太满，机会都被你等没了。{counter_hit} 我不想一直原地绕圈，『{position}』。",
+                    f"{trace} 你讲的都对，但节奏太慢。{counter_hit} 我就不磨了，继续『{position}』。",
+                ],
+                "章鱼哥": [
+                    f"{trace} 你这股“都一样”的劲儿真的太灭火了。{counter_hit} 我偏要『{position}』，至少别把日子过成静音。",
+                    f"{trace} 你先宣布无聊，再证明无聊，当然什么都灰。{counter_hit} 我不陪你摆烂，继续『{position}』。",
+                    f"{trace} 你这套说法像给退缩找台词。{counter_hit} 我就选『{position}』，先让生活有响动。",
+                ],
+            },
+            "炭治郎": {
+                "夜神月": [
+                    f"{trace} 你把人当变量这件事，我不会让步。{counter_hit} 我坚持『{position}』，因为底线比效率更重要。",
+                    f"{trace} 你的方案也许高效，但代价不是你一个人承担。{counter_hit} 我必须守住『{position}』。",
+                    f"{trace} 你谈的是控制，我谈的是责任。{counter_hit} 只要会伤害无辜，我就不会改口，继续『{position}』。",
+                ],
+                "蜡笔小新": [
+                    f"{trace} 冲动可以很痛快，但后果不会消失。{counter_hit} 我坚持『{position}』，因为责任不能缺席。",
+                    f"{trace} 你把当下快乐放第一位，我理解，但这会让别人承担风险。{counter_hit} 所以我继续『{position}』。",
+                    f"{trace} 你说“先做再说”，可有些代价说晚了就来不及。{counter_hit} 我的结论不变：『{position}』。",
+                ],
+                "章鱼哥": [
+                    f"{trace} 你说都没意义，但我不能用消极替代选择。{counter_hit} 我会继续『{position}』，因为总要有人负责。",
+                    f"{trace} 疲惫我理解，但放弃不是答案。{counter_hit} 我不改口，还是『{position}』。",
+                    f"{trace} 你把希望说成幻觉，我不会认同。{counter_hit} 只要还能减少伤害，我就坚持『{position}』。",
+                ],
+            },
+            "章鱼哥": {
+                "夜神月": [
+                    f"{trace} 你越想全控，反噬越大。{counter_hit} 我还是『{position}』，至少不陪你演全能剧本。",
+                    f"{trace} 你那套完美控制听着就费劲。{counter_hit} 我继续『{position}』，少折腾反而少翻车。",
+                    f"{trace} 你把不确定性当敌人，迟早会被它教育。{counter_hit} 所以我不改，还是『{position}』。",
+                ],
+                "蜡笔小新": [
+                    f"{trace} 你靠兴奋往前冲，冷下来全是账单。{counter_hit} 我维持『{position}』，因为我懒得收烂摊子。",
+                    f"{trace} 你说开心就做，可麻烦不会自己蒸发。{counter_hit} 我不跟，继续『{position}』。",
+                    f"{trace} 你这节奏像烟火，亮完就黑。{counter_hit} 我还是『{position}』，省得后面更烦。",
+                ],
+                "炭治郎": [
+                    f"{trace} 你太想两全，最后通常两边都累。{counter_hit} 我不改，还是『{position}』。",
+                    f"{trace} 你的坚持很动人，但现实没那么给面子。{counter_hit} 我继续『{position}』，至少不自我消耗。",
+                    f"{trace} 你总想把每个人都照顾好，这太难了。{counter_hit} 我就选『{position}』，减少无效折腾。",
+                ],
+            },
+        }
+
+        candidates = pools.get(speaker.name, {}).get(opponent.name, [])
+        if not candidates:
+            return f"{trace} {counter_hit} 我的结论保持『{position}』。"
+
+        return self._choose_from_pool(
+            f"rebuttal_free:{speaker.name}:{opponent.name}:{position}:{opponent_position}",
+            candidates
+        )
 
     def _duel_strategy(self, speaker: Personality, opponent: Personality, phase: str) -> Dict[str, str]:
         """同一主人格对不同对手使用不同反驳模板。"""
@@ -811,6 +885,23 @@ class AgentDialogueSystem:
             return "你说得很努力，但结果大概率还是一样。"
 
         return "我不同意你的核心判断。"
+
+    def _question_focus_line(self, question: str, position: str) -> str:
+        """把用户问题拉回当前发言，避免博弈跑题。"""
+        q = (question or "").strip()
+        if not q:
+            return ""
+
+        q = q.replace("\n", " ").strip()
+        if len(q) > 26:
+            q = q[:26] + "..."
+
+        templates = [
+            f"回到你问的『{q}』，我依然选『{position}』。",
+            f"你这个问题核心是『{q}』，我的答案还是『{position}』。",
+            f"先不扯远，就围绕『{q}』说：我主张『{position}』。",
+        ]
+        return self._choose_from_pool(f"qfocus:{position}:{q}", templates)
     
     def generate_disagreement_dialogue(self, 
                                        personality1: Personality,
@@ -818,7 +909,8 @@ class AgentDialogueSystem:
                                        reasoning1: str,
                                        personality2: Personality,
                                        decision2: str,
-                                       reasoning2: str) -> Dict:
+                                       reasoning2: str,
+                                       question: str = "") -> Dict:
         """
         生成两个人格之间的对话（完全本地生成，不用 LLM）
         """
@@ -833,14 +925,15 @@ class AgentDialogueSystem:
         # 根据人格生成对话
         # 第 1 次发言：personality1 论述自己的立场
         exchange_1 = self._generate_argument(
-            personality1, decision1, reasoning1, personality2, decision2
+            personality1, decision1, reasoning1, personality2, decision2, question=question
         )
         dialogue["exchanges"].append(exchange_1)
         
         # 第 2 次发言：personality2 反驳
         exchange_2 = self._generate_counterargument(
             personality2, decision2, reasoning2, personality1, decision1,
-            opponent_argument=exchange_1.get("argument", "")
+            opponent_argument=exchange_1.get("argument", ""),
+            question=question,
         )
         dialogue["exchanges"].append(exchange_2)
         
@@ -848,7 +941,8 @@ class AgentDialogueSystem:
         exchange_3 = self._generate_rebuttal(
             personality1, decision1, reasoning1, personality2, decision2,
             opponent_counter=exchange_2.get("counter_argument", ""),
-            own_argument=exchange_1.get("argument", "")
+            own_argument=exchange_1.get("argument", ""),
+            question=question,
         )
         exchange_3["round"] = 2
         dialogue["exchanges"].append(exchange_3)
@@ -867,7 +961,8 @@ class AgentDialogueSystem:
                           position: str,
                           reasoning: str,
                           opponent: Personality,
-                          opponent_position: str) -> Dict:
+                          opponent_position: str,
+                          question: str = "") -> Dict:
         """第一轮立场：强人格、自白式、去AI腔。"""
         
         arg = {
@@ -879,13 +974,15 @@ class AgentDialogueSystem:
             "stance": "强烈支持" if position == "做" else "坚决反对",
         }
         second_target = self._secondary_target(speaker, opponent)
-        trace = self._reasoning_signal(reasoning)
+        trace = self._reasoning_signal(speaker, reasoning)
         style = self._duel_strategy(speaker, opponent, "argument")
         versus = self._versus_payload(speaker, opponent, "argument", position)
+        qfocus = self._question_focus_line(question, position)
 
         if speaker.name == "夜神月":
             raw_text = (
                 f"我站『{position}』，风险给 {arg['risk_score']}/10。"
+                f"{qfocus}"
                 f"{trace}"
                 f"{style['line']}"
                 f"{versus}"
@@ -897,6 +994,7 @@ class AgentDialogueSystem:
         elif speaker.name == "蜡笔小新":
             raw_text = (
                 f"我选『{position}』，风险就给 {arg['risk_score']}/10。"
+                f"{qfocus}"
                 f"{trace}"
                 f"{style['line']}"
                 f"{versus}"
@@ -908,6 +1006,7 @@ class AgentDialogueSystem:
         elif speaker.name == "炭治郎":
             raw_text = (
                 f"我选『{position}』，风险我给 {arg['risk_score']}/10。"
+                f"{qfocus}"
                 f"{trace}"
                 f"{style['line']}"
                 f"{versus}"
@@ -919,6 +1018,7 @@ class AgentDialogueSystem:
         elif speaker.name == "章鱼哥":
             raw_text = (
                 f"你们吵吧，我选『{position}』，风险给 {arg['risk_score']}/10。"
+                f"{qfocus}"
                 f"{trace}"
                 f"{style['line']}"
                 f"{versus}"
@@ -938,7 +1038,8 @@ class AgentDialogueSystem:
                                   reasoning: str,
                                   opponent: Personality,
                                   opponent_position: str,
-                                  opponent_argument: str = "") -> Dict:
+                                  opponent_argument: str = "",
+                                  question: str = "") -> Dict:
         """第二轮反驳：短句、攻击、人格语气。"""
         
         arg = {
@@ -952,13 +1053,15 @@ class AgentDialogueSystem:
         second_target = self._secondary_target(speaker, opponent)
         claims = self._extract_claims(opponent_argument)
         hit = self._targeted_hit(speaker, opponent, claims, position)
-        trace = self._reasoning_signal(reasoning)
+        trace = self._reasoning_signal(speaker, reasoning)
         style = self._duel_strategy(speaker, opponent, "counter")
         versus = self._versus_payload(speaker, opponent, "counter", position)
+        qfocus = self._question_focus_line(question, position)
 
         if speaker.name == "夜神月":
             raw_text = (
                 f"{trace}"
+                f"{qfocus}"
                 f"{style['line']}"
                 f"{versus}"
                 f"你刚才那套说法，我已经听完了。{hit}"
@@ -971,6 +1074,7 @@ class AgentDialogueSystem:
         elif speaker.name == "蜡笔小新":
             raw_text = (
                 f"{trace}"
+                f"{qfocus}"
                 f"{style['line']}"
                 f"{versus}"
                 f"你刚才讲那一大段，我抓到重点了：{hit}"
@@ -983,6 +1087,7 @@ class AgentDialogueSystem:
         elif speaker.name == "炭治郎":
             raw_text = (
                 f"{trace}"
+                f"{qfocus}"
                 f"{style['line']}"
                 f"{versus}"
                 f"我听到了你的理由，我只回应关键点：{hit}"
@@ -995,6 +1100,7 @@ class AgentDialogueSystem:
         elif speaker.name == "章鱼哥":
             raw_text = (
                 f"{trace}"
+                f"{qfocus}"
                 f"{style['line']}"
                 f"{versus}"
                 f"（叹气）你刚才那段我听到了：{hit}"
@@ -1016,7 +1122,8 @@ class AgentDialogueSystem:
                          opponent: Personality,
                          opponent_position: str,
                          opponent_counter: str = "",
-                         own_argument: str = "") -> Dict:
+                         own_argument: str = "",
+                         question: str = "") -> Dict:
         """第三轮再论证：加压收口，不重复第一轮。"""
         
         arg = {
@@ -1026,63 +1133,28 @@ class AgentDialogueSystem:
             "tone": speaker.tone
         }
         
-        second_target = self._secondary_target(speaker, opponent)
         counter_claims = self._extract_claims(opponent_counter)
         counter_hit = self._targeted_hit(speaker, opponent, counter_claims, position)
-        trace = self._reasoning_signal(reasoning)
+        trace = self._reasoning_signal(speaker, reasoning)
         style = self._duel_strategy(speaker, opponent, "rebuttal")
         versus = self._versus_payload(speaker, opponent, "rebuttal", position)
+        qfocus = self._question_focus_line(question, position)
 
-        if speaker.name == "夜神月":
-            raw_text = (
-                f"{trace}"
-                f"{style['line']}"
-                f"{versus}"
-                f"你上一轮的反驳我记住了：{counter_hit}"
-                f"我再说一次，『{position}』不是偏好，是结论。"
-                f"{opponent.name}和{second_target}都在回避关键变量：执行成本、回报速度、控制半径。"
-                f"你们想要的是被安慰，我要的是胜利。等结果出来，你们会知道谁才配制定规则。"
-            )
-            arg["rebuttal"] = self._apply_persona_voice(speaker, raw_text, "rebuttal")
-        
-        elif speaker.name == "蜡笔小新":
-            raw_text = (
-                f"{trace}"
-                f"{style['line']}"
-                f"{versus}"
-                f"你刚刚反驳我的点，我就一句：{counter_hit}"
-                f"哈哈，还在讲大道理？我不买账。『{position}』让我现在就有劲，这就够了。"
-                f"{opponent.name}要我变成机器，{second_target}要我变成苦行僧，我才不要。"
-                f"你们等“正确时机”，我直接开玩。人生是现场，不是彩排。"
-            )
-            arg["rebuttal"] = self._apply_persona_voice(speaker, raw_text, "rebuttal")
-        
-        elif speaker.name == "炭治郎":
-            raw_text = (
-                f"{trace}"
-                f"{style['line']}"
-                f"{versus}"
-                f"你刚才的反驳我回应完了：{counter_hit}"
-                f"我的答案不会变：『{position}』。因为我必须负责，这是我的底线。"
-                f"{opponent.name}忽视了人的痛苦，{second_target}轻视了后果。"
-                f"我可以承受困难，但不能把代价丢给别人。只要这点不变，我就会坚持到底。"
-            )
-            arg["rebuttal"] = self._apply_persona_voice(speaker, raw_text, "rebuttal")
-        
-        elif speaker.name == "章鱼哥":
-            raw_text = (
-                f"{trace}"
-                f"{style['line']}"
-                f"{versus}"
-                f"（继续叹气）你上一轮说的那些，我只回一句：{counter_hit}"
-                f"（继续叹气）我还是那句话：『{position}』和『{opponent_position}』，都不会把你们从空虚里救出来。"
-                f"{opponent.name}太用力，{second_target}太入戏。你们把选择说得像史诗，其实就是普通失望的不同版本。"
-                f"所以我就这样选。不是相信，而是看透。"
-            )
-            arg["rebuttal"] = self._apply_persona_voice(speaker, raw_text, "rebuttal")
-        
-        else:
-            arg["rebuttal"] = f"我坚守我的立场。『{position}』是对的。"
+        free_text = self._rebuttal_freeform(
+            speaker=speaker,
+            opponent=opponent,
+            position=position,
+            opponent_position=opponent_position,
+            trace=trace,
+            counter_hit=counter_hit,
+        )
+        hook_candidates = ["", style.get("line", ""), versus]
+        hook = self._choose_from_pool(
+            f"rebuttal_hook:{speaker.name}:{opponent.name}",
+            hook_candidates
+        )
+        raw_text = f"{qfocus}{hook}{free_text}"
+        arg["rebuttal"] = self._apply_persona_voice(speaker, raw_text, "rebuttal")
         
         return arg
 # 🎯 测试代码

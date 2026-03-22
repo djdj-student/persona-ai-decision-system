@@ -1,12 +1,12 @@
 # 🚀 完整的 Agent 决策系统集成（主文件）
 
 from agent_engine import AgentDecisionEngine
-from agent_reflection import AgentReflectionSystem, AgentDialogueSystem
+from agent_reflection import AgentReflectionSystem
 from hybrid_system import HybridDecisionSystem
 from personality import Personality
 from test import call_api, parse_result, log_message
 import os
-from prompt import build_prompt, build_judge_prompt, build_debate_prompt
+from prompt import build_prompt
 import json
 from datetime import datetime
 
@@ -19,18 +19,18 @@ if not os.path.exists(LOG_DIR):
 # 🎯 新的主工作流：Agent + LLM 混合模式
 # ============================================
 
-def hybrid_multi_round_decision(question: str, personalities: list, 
-                               use_local_only: bool = False,
+def hybrid_multi_round_decision(question: str, personalities: list,
                                use_full_workflow: bool = True,
-                               depth: str = "standard") -> dict:
+                               depth: str = "deep") -> dict:
     """
     完整的混合决策系统
     
     参数：
-    - use_local_only: 只使用本地 Agent 决策（完全不用 LLM）
     - use_full_workflow: 使用完整的 5 阶段工作流
-    - depth: 反思深度 (quick, standard, deep, expert)
+    - depth: 反思深度（固定为 deep）
     """
+
+    depth = "deep"
     
     print("\n" + "="*80)
     print("🤖 智能 Agent 决策系统启动")
@@ -47,7 +47,6 @@ def hybrid_multi_round_decision(question: str, personalities: list,
     all_results = {
         "question": question,
         "timestamp": datetime.now().isoformat(),
-        "use_local_only": use_local_only,
         "depth": depth,
         "stages": {}
     }
@@ -61,14 +60,14 @@ def hybrid_multi_round_decision(question: str, personalities: list,
         log_message("✨ 启动完整混合工作流（5阶段）")
         
         hybrid_system = HybridDecisionSystem(
-            llm_call_func=call_api if not use_local_only else None
+            llm_call_func=call_api
         )
         
         workflow = hybrid_system.full_decision_workflow(
             personalities=personalities,
             question=question,
             depth=depth,
-            use_llm=not use_local_only
+            use_llm=True
         )
         
         all_results["workflow"] = workflow
@@ -105,79 +104,56 @@ def hybrid_multi_round_decision(question: str, personalities: list,
         # =========================
         # ROUND 2: LLM 强化 + 反思
         # =========================
-        if not use_local_only:
-            print("\n🧠 ROUND 2：LLM 强化决策")
-            print("-" * 60)
-            
-            reflection_system = AgentReflectionSystem()
-            
-            score_do = 0
-            score_not = 0
-            
-            for i, p in enumerate(personalities):
-                local_decision = round1_decisions[i]
-                
-                # 用 LLM 强化决策
-                llm_prompt = build_prompt(p, question, personalities)
-                llm_response = call_api(llm_prompt)
-                
-                decision, weight, confidence, risk_score = parse_result(llm_response, debug=False)
-                
-                # 使用反思系统进行深度分析
-                reflection = reflection_system.multi_round_reflection(
-                    personality=p,
-                    initial_decision=decision or local_decision['decision'],
-                    question=question,
-                    risk_level=risk_level,
-                    depth=depth,
-                    local_reasoning=local_decision['reasoning']
-                )
-                
-                final_decision = reflection['final_verdict']
-                
-                print(f"✓ {p.name}：{final_decision} "
-                      f"（信心 {reflection['confidence_evolution'][-1]}/10）")
-                
-                # 加权计分
-                if final_decision == "做":
-                    score_do += weight
-                else:
-                    score_not += weight
-                
-                all_results["stages"]["round2"].append({
-                    "personality": p.name,
-                    "llm_response": llm_response[:200],
-                    "final_decision": final_decision,
-                    "reflection_stability": reflection.get('confidence_evolution', [])
-                })
-            
-            all_results["stages"]["round2_scores"] = {
-                "支持做": round(score_do, 2),
-                "支持不做": round(score_not, 2)
-            }
-            all_results["final_decision"] = "做" if score_do > score_not else "不做"
-        
-        else:
-            # 纯本地模式：只用本地 Agent
-            print("\n✨ 纯本地模式（不使用 LLM）")
-            print("-" * 60)
-            
-            score_do = 0
-            score_not = 0
-            
-            for i, p in enumerate(personalities):
-                local_decision = round1_decisions[i]
-                
-                if local_decision['decision'] == "做":
-                    score_do += local_decision['weight']
-                else:
-                    score_not += local_decision['weight']
-            
-            all_results["stages"]["local_scores"] = {
-                "支持做": round(score_do, 2),
-                "支持不做": round(score_not, 2)
-            }
-            all_results["final_decision"] = "做" if score_do > score_not else "不做"
+        print("\n🧠 ROUND 2：LLM 强化决策")
+        print("-" * 60)
+
+        reflection_system = AgentReflectionSystem()
+
+        score_do = 0
+        score_not = 0
+
+        for i, p in enumerate(personalities):
+            local_decision = round1_decisions[i]
+
+            # 用 LLM 强化决策
+            llm_prompt = build_prompt(p, question, personalities)
+            llm_response = call_api(llm_prompt)
+
+            decision, weight, confidence, risk_score = parse_result(llm_response, debug=False)
+
+            # 使用反思系统进行深度分析
+            reflection = reflection_system.multi_round_reflection(
+                personality=p,
+                initial_decision=decision or local_decision['decision'],
+                question=question,
+                risk_level=risk_level,
+                depth=depth,
+                local_reasoning=local_decision['reasoning']
+            )
+
+            final_decision = reflection['final_verdict']
+
+            print(f"✓ {p.name}：{final_decision} "
+                  f"（信心 {reflection['confidence_evolution'][-1]}/10）")
+
+            # 加权计分
+            if final_decision == "做":
+                score_do += weight
+            else:
+                score_not += weight
+
+            all_results["stages"]["round2"].append({
+                "personality": p.name,
+                "llm_response": llm_response[:200],
+                "final_decision": final_decision,
+                "reflection_stability": reflection.get('confidence_evolution', [])
+            })
+
+        all_results["stages"]["round2_scores"] = {
+            "支持做": round(score_do, 2),
+            "支持不做": round(score_not, 2)
+        }
+        all_results["final_decision"] = "做" if score_do > score_not else "不做"
     
     # ============================================
     # 📊 最终总结
@@ -201,12 +177,11 @@ def hybrid_multi_round_decision(question: str, personalities: list,
 # 🎯 使用示例
 # ============================================
 
-def main(use_full_workflow: bool = True, use_local_only: bool = False):
+def main(use_full_workflow: bool = True):
     """
     主函数
     
     use_full_workflow: 是否使用完整的 5 阶段工作流
-    use_local_only: 是否只使用本地 Agent（不调用 LLM）
     """
     
     log_message("🚀 Agent 决策系统启动")
@@ -250,7 +225,6 @@ def main(use_full_workflow: bool = True, use_local_only: bool = False):
     result = hybrid_multi_round_decision(
         question=question,
         personalities=personalities,
-        use_local_only=use_local_only,
         use_full_workflow=use_full_workflow,
         depth="deep"  # 深度思考
     )
@@ -303,13 +277,7 @@ if __name__ == "__main__":
     
     # 检查命令行参数
     use_full_workflow = True
-    use_local_only = False
-    
     if len(sys.argv) > 1:
-        if "--local-only" in sys.argv:
-            use_local_only = True
-            print("🔒 使用纯本地模式（不调用 LLM）")
-        
         if "--simple" in sys.argv:
             use_full_workflow = False
             print("📌 使用简化两轮模式")
@@ -319,4 +287,4 @@ if __name__ == "__main__":
             sys.exit(0)
     
     # 启动主程序
-    main(use_full_workflow=use_full_workflow, use_local_only=use_local_only)
+    main(use_full_workflow=use_full_workflow)

@@ -1,10 +1,8 @@
-import re
 import streamlit as st
 import base64
 from test import call_api
 from personality import Personality
 from hybrid_system import HybridDecisionSystem
-from agent_engine import AgentDecisionEngine
 
 # =========================
 # 🎨 页面配置
@@ -25,6 +23,10 @@ bg = get_base64("bg.jpg")
 # =========================
 st.markdown(f"""
 <style>
+
+:root {{
+    --narrow-width: 860px;
+}}
 
 /* 🌄 背景：清晰 + 微暗 */
 .stApp {{
@@ -52,6 +54,38 @@ st.markdown(f"""
     z-index: 1;
     padding-top: 2rem;
     max-width: 1200px;
+    margin: 0 auto;
+    text-align: center;
+}}
+
+/* 输入区与按钮居中 */
+div[data-testid="stTextArea"], div[data-testid="stTextInput"] {{
+    max-width: var(--narrow-width);
+    margin: 0 auto;
+}}
+
+div[data-testid="stTextArea"] textarea {{
+    text-align: left;
+}}
+
+div[data-testid="stButton"] {{
+    display: flex;
+    justify-content: center;
+}}
+
+div[data-testid="stButton"] > button {{
+    margin: 0 auto;
+    display: block;
+}}
+
+/* 隐藏输入框右下角英文提示（如 Press Ctrl+Enter to apply） */
+div[data-testid="InputInstructions"] {{
+    display: none !important;
+}}
+
+/* 全局文字居中 */
+h1, h2, h3, h4, h5, h6, p, label, .stMarkdown, .stCaption {{
+    text-align: center !important;
 }}
 
 /* 💎 卡片统一风格 */
@@ -167,6 +201,9 @@ st.markdown("""
 
 [data-testid="stExpander"] {
     border: none !important;
+    max-width: var(--narrow-width) !important;
+    margin-left: auto !important;
+    margin-right: auto !important;
 }
 
 /* =========================
@@ -305,9 +342,10 @@ personalities = [
 ]
 
 # =========================
-# 🧱 布局
+# 🧱 布局（单列）
 # =========================
-col1, col2 = st.columns([1, 2])
+col1 = st.container()
+col2 = st.container()
 
 # =========================
 # 📝 左侧
@@ -325,19 +363,15 @@ with col1:
         placeholder="例如：我该不该辞职创业？"
     )
 
-    use_local_only = st.toggle("🔒 纯本地模式（不调用LLM）", value=False)
-    depth = st.selectbox(
-        "🧠 反思深度",
-        options=["quick", "standard", "deep", "expert"],
-        index=2,
-        help="quick 最快，expert 最深"
-    )
+    depth = "deep"
 
-    if st.button("🚀 开始决策"):
+    _, center_btn_col, _ = st.columns([1, 1, 1])
+    with center_btn_col:
+        run_clicked = st.button("🚀 开始决策", use_container_width=True)
+
+    if run_clicked:
         st.session_state.run = True
         st.session_state.question = question
-        st.session_state.use_local_only = use_local_only
-        st.session_state.depth = depth
 
     st.markdown("---")
 
@@ -348,21 +382,21 @@ with col2:
     if st.session_state.get("run") and st.session_state.question:
 
         question = st.session_state.question
-        use_local_only = st.session_state.get("use_local_only", False)
-        depth = st.session_state.get("depth", "deep")
+        depth = "deep"
 
         with st.spinner("🧠 AI正在深度思考中..."):
-            system = HybridDecisionSystem(llm_call_func=None if use_local_only else call_api)
+            system = HybridDecisionSystem(llm_call_func=call_api)
             result = system.full_decision_workflow(
                 personalities=personalities,
                 question=question,
                 depth=depth,
-                use_llm=not use_local_only
+                use_llm=True
             )
 
-        st.caption(f"🔧 运行模式：{'纯本地' if use_local_only else '混合'} | 反思深度：{depth}")
+        st.caption(f"🔧 反思深度：{depth}")
 
         stages = result.get("stages", {})
+
 
         # 详细 Stage 1-3 工作流
         with st.expander("📊 工作流详情 (Stage 1-3)", expanded=True):
@@ -391,27 +425,19 @@ with col2:
 
             # Stage 2 LLM 验证
             st.markdown("### ✅ Stage 2 - LLM 验证（人格一致性检查）")
-            if not use_local_only:
-                validations = stages.get("2_llm_validations", {})
-                if validations:
-                    for name, data in validations.items():
-                        validated = data.get("validated", False)
-                        status = "✅ 验证通过" if validated else "⚠️ 需要调整"
-                        with st.expander(f"{name} | {status}", expanded=False):
-                            reason = data.get("reason", "")
-                            full_response = data.get("full_response", "")
+            validations = stages.get("2_llm_validations", {})
+            if validations:
+                for name, data in validations.items():
+                    validated = data.get("validated", False)
+                    status = "✅ 验证通过" if validated else "⚠️ 需要调整"
+                    with st.expander(f"{name} | {status}", expanded=False):
+                        full_response = data.get("full_response", "")
 
-                            if reason:
-                                st.markdown("**验证结论：**")
-                                st.write(reason)
-
-                            if full_response:
-                                st.markdown("**LLM 详细反馈：**")
-                                st.write(full_response)
-                else:
-                    st.write("暂无 LLM 验证数据")
+                        if full_response:
+                            st.markdown("**LLM 详细反馈：**")
+                            st.write(full_response)
             else:
-                st.info("当前为纯本地模式，已跳过 Stage 2 的 LLM 验证。")
+                st.write("暂无 LLM 验证数据")
 
             # Stage 3 多轮反思
             st.markdown("### 🧠 Stage 3 - 多轮反思轨迹（Round by Round）")

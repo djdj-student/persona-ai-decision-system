@@ -5,6 +5,7 @@ from personality import Personality
 from agent_engine import AgentDecisionEngine
 from agent_reflection import AgentReflectionSystem, AgentDialogueSystem
 import json
+import re
 from datetime import datetime
 
 class HybridDecisionSystem:
@@ -33,12 +34,15 @@ class HybridDecisionSystem:
                               personalities: List[Personality],
                               question: str,
                               context: str = "",
-                              depth: str = "standard",
+                              depth: str = "deep",
                               use_llm: bool = True) -> Dict:
         """
         完整的混合决策工作流
         """
         
+        # 全局固定深度为 deep，忽略外部传入值
+        depth = "deep"
+
         workflow = {
             "question": question,
             "context": context,
@@ -135,11 +139,23 @@ class HybridDecisionSystem:
                 reflection2 = stage3_reflections[p2.name]
                 reasoning1 = self._build_dialogue_reasoning(reflection1)
                 reasoning2 = self._build_dialogue_reasoning(reflection2)
-                
-                dialogue = self.dialogue_system.generate_disagreement_dialogue(
-                    p1, reflection1["final_verdict"], reasoning1,
-                    p2, reflection2["final_verdict"], reasoning2
-                )
+
+                if use_llm and self.llm_call_func:
+                    dialogue = self._generate_stage4_dialogue_with_llm(
+                        p1,
+                        reflection1["final_verdict"],
+                        reasoning1,
+                        p2,
+                        reflection2["final_verdict"],
+                        reasoning2,
+                        question,
+                    )
+                else:
+                    dialogue = self.dialogue_system.generate_disagreement_dialogue(
+                        p1, reflection1["final_verdict"], reasoning1,
+                        p2, reflection2["final_verdict"], reasoning2,
+                        question=question,
+                    )
                 
                 dialogue_key = f"{p1.name}_vs_{p2.name}"
                 stage4_dialogues[dialogue_key] = dialogue
@@ -161,8 +177,6 @@ class HybridDecisionSystem:
             personalities,
             stage1_decisions,
             stage3_reflections,
-            stage4_dialogues,
-            question
         )
         
         workflow["stages"]["4.5_judge"] = stage45_judge
@@ -234,6 +248,110 @@ class HybridDecisionSystem:
             f"思考={compact_thought or '无'}；"
             f"证据={compact_points or '无'}"
         )
+
+    def _generate_stage4_dialogue_with_llm(self,
+                                           p1: Personality,
+                                           d1: str,
+                                           r1: str,
+                                           p2: Personality,
+                                           d2: str,
+                                           r2: str,
+                                           question: str) -> Dict:
+        """Stage 4 优先使用 LLM 生成人格对话，避免固定模板化表达。"""
+
+        prompt = f"""
+你现在要生成两个人格的一对一辩论，禁止模板句，必须像角色本人说话。
+
+角色A：
+- 名字：{p1.name}
+- 风险偏好：{p1.risk}
+- 情绪强度：{p1.emotion}
+- 理性程度：{p1.logic}
+- 世界观：{p1.worldview}
+- 决策方式：{p1.decision_style}
+- 语言风格：{p1.tone}
+- 当前结论：{d1}
+- 思考线索：{r1}
+
+角色B：
+- 名字：{p2.name}
+- 风险偏好：{p2.risk}
+- 情绪强度：{p2.emotion}
+- 理性程度：{p2.logic}
+- 世界观：{p2.worldview}
+- 决策方式：{p2.decision_style}
+- 语言风格：{p2.tone}
+- 当前结论：{d2}
+- 思考线索：{r2}
+
+任务要求：
+1. 生成3轮对话：A立场陈述 -> B反驳 -> A强硬回应。
+2. 每轮必须有“思考痕迹”，体现该角色如何从线索得出当前句子。
+3. A对B的强硬回应必须针对B本轮内容，不能复述A第一轮。
+4. 必须围绕用户原问题展开，不能跑题；每轮至少提到一次问题核心（例如“辞职/创业”等关键词）。
+4. 禁止出现“作为AI/综合来看/首先其次最后/建议你”等模板化表达。
+5. 语言要自然、有情绪，不要报告体。
+
+用户原问题：{question}
+
+仅输出严格JSON，不要任何额外说明：
+{{
+  "exchanges": [
+    {{"speaker":"{p1.name}", "type":"argument", "content":"..."}},
+    {{"speaker":"{p2.name}", "type":"counter_argument", "content":"..."}},
+    {{"speaker":"{p1.name}", "type":"rebuttal", "content":"..."}}
+  ]
+}}
+"""
+
+        try:
+            resp = (self.llm_call_func(prompt) or "").strip()
+            text = resp
+
+            # 清理可能的 markdown code fence
+            if text.startswith("```"):
+                lines = text.splitlines()
+                if len(lines) >= 3:
+                    text = "\n".join(lines[1:-1]).strip()
+
+            data = json.loads(text)
+            raw_exchanges = data.get("exchanges", [])
+
+            exchanges = []
+            for item in raw_exchanges[:3]:
+                speaker = item.get("speaker", "")
+                etype = item.get("type", "")
+                content = str(item.get("content", "")).strip()
+
+                if not content:
+                    continue
+
+                if etype == "argument":
+                    exchanges.append({"speaker": speaker, "position": d1 if speaker == p1.name else d2, "argument": content})
+                elif etype == "counter_argument":
+                    exchanges.append({"speaker": speaker, "counter_to": p1.name if speaker == p2.name else p2.name, "position": d2 if speaker == p2.name else d1, "counter_argument": content})
+                elif etype == "rebuttal":
+                    exchanges.append({"speaker": speaker, "position": d1 if speaker == p1.name else d2, "rebuttal": content})
+
+            if len(exchanges) < 3:
+                raise ValueError("LLM 对话结构不足")
+
+            conflict_intensity = abs(p1.risk - p2.risk) * 0.5
+            if d1 != d2:
+                conflict_intensity += 0.5
+
+            return {
+                "participants": [p1.name, p2.name],
+                "stance": [d1, d2],
+                "exchanges": exchanges,
+                "conflict_intensity": min(conflict_intensity, 1.0),
+                "origin": "llm"
+            }
+        except Exception:
+            # 兜底回退：LLM 失败时使用本地生成，保证流程不中断
+            return self.dialogue_system.generate_disagreement_dialogue(
+                p1, d1, r1, p2, d2, r2, question=question
+            )
     
     def _llm_validate_decision(self, personality: Personality, question: str, local_decision: Dict) -> Dict:
         """
@@ -259,17 +377,34 @@ class HybridDecisionSystem:
 2. 逻辑是否自洽？
 3. 是否有明显的漏洞？
 
-如果没有问题，输出：验证通过
-如果有问题，输出：需要调整 + 原因
+请严格按以下格式输出：
+【结论】验证通过 / 需要调整
+【人格特征符合度】一句话
+【逻辑一致性】一句话
+【漏洞】一句话（若无写“无明显漏洞”）
+【调整建议】一句话（若无需调整写“保持当前决策”）
+
+要求：总长度控制在220字以内，避免冗长。
 """
         
         try:
             response = self.llm_call_func(validation_prompt)
-            validated = "验证通过" in response
+            text = (response or "").strip()
+
+            # 更稳的结论解析：优先读【结论】字段，其次关键词兜底
+            verdict_match = re.search(r"【结论】\s*(验证通过|需要调整)", text)
+            if verdict_match:
+                validated = verdict_match.group(1) == "验证通过"
+            else:
+                validated = ("验证通过" in text) and ("需要调整" not in text)
+
+            # 不再截断 reason，避免出现“半句断掉”的体验
+            reason = text
+
             return {
                 "validated": validated,
-                "reason": response[:100] if not validated else "",
-                "full_response": response
+                "reason": reason,
+                "full_response": text
             }
         except Exception as e:
             return {
@@ -355,9 +490,7 @@ class HybridDecisionSystem:
     def _judge_all_decisions(self,
                             personalities: List[Personality],
                             stage1: Dict,
-                            stage3: Dict,
-                            stage4: Dict,
-                            question: str) -> Dict:
+                            stage3: Dict) -> Dict:
         """
         STAGE 4.5 裁判系统：评估所有人格的决策质量
         
@@ -387,7 +520,7 @@ class HybridDecisionSystem:
             # 收集数据
             final_decision = reflection["final_verdict"]
             confidence = local_decision["confidence"]
-            risk = local_decision.get("risk", 5)
+            risk = local_decision.get("risk_score", 5)
             
             # 评估维度
             evaluation = {
@@ -463,7 +596,7 @@ class HybridDecisionSystem:
             consistency = 0.9  # 保持一致
         else:
             # 检查是否有理由变更
-            rounds = reflection.get("reflection_rounds", [])
+            rounds = reflection.get("rounds", [])
             if len(rounds) > 1 and rounds[-1].get("analysis"):
                 consistency = 0.7  # 有理由的改变
             else:
@@ -476,7 +609,7 @@ class HybridDecisionSystem:
         # 高风险但有理由 = 现实
         # 低风险但说法幼稚 = 不现实
         
-        risk = decision.get("risk", 5)
+        risk = decision.get("risk_score", 5)
         reasoning = decision.get("reasoning", "")
         
         # 如果reasoning超过50字 = 考虑周全

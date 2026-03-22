@@ -25,12 +25,6 @@ def log_message(msg):
 API_URL = "https://api.deepseek.com/chat/completions"
 API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
-# =========================
-# 🔥 调用API
-# =========================
-def clean_text(text):
-    return text.encode("utf-8", "ignore").decode("utf-8")
-
 def call_api(prompt, max_retries=3):
     """调用 DeepSeek API，带重试机制和详细错误日志"""
     headers = {
@@ -218,7 +212,6 @@ def run_multi_round_decision(question, personalities):
         elif risk_score <= 3 and decision == "不做":
             weight *= 0.7
 
-        import random
         weight *= random.uniform(0.85, 1.15)
 
         if decision == "做":
